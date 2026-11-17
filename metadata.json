@@ -1,0 +1,6 @@
+{
+  "name": "ImageLab",
+  "description": "A community platform where users discover AI-generated images, inspect the exact prompts behind them, copy prompts, and publish their own AI creations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,574 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core helper functions
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidUsername(name) {
+      return name is string && name.size() >= 3 && name.size() <= 30 && name.matches('^[a-z0-9_]+$');
+    }
+
+    function hasUserProfile() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function currentUserProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isSuperAdmin() {
+      return isVerifiedUser()
+        && hasUserProfile()
+        && currentUserProfile().role == 'super_admin'
+        && currentUserProfile().accountStatus == 'active';
+    }
+
+    function isAdmin() {
+      return isVerifiedUser()
+        && hasUserProfile()
+        && (currentUserProfile().role == 'admin' || currentUserProfile().role == 'super_admin')
+        && currentUserProfile().accountStatus == 'active';
+    }
+
+    // Validation blueprint: UserProfile
+    function isValidUserProfileData(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'fullName',
+          'username',
+          'email',
+          'photoURL',
+          'bio',
+          'role',
+          'accountStatus',
+          'createdAt',
+          'lastLoginAt'
+        ])
+        && data.keys().hasOnly([
+          'uid',
+          'fullName',
+          'username',
+          'email',
+          'photoURL',
+          'bio',
+          'role',
+          'accountStatus',
+          'createdAt',
+          'lastLoginAt'
+        ])
+        && data.uid is string && data.uid == userId && isValidId(data.uid)
+        && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 100
+        && isValidUsername(data.username)
+        && data.email is string && data.email.size() >= 5 && data.email.size() <= 150
+        && data.photoURL is string && data.photoURL.size() <= 1000
+        && data.bio is string && data.bio.size() <= 500
+        && data.role in ['super_admin', 'admin', 'contributor']
+        && data.accountStatus in ['active', 'suspended']
+        && data.createdAt is timestamp
+        && data.lastLoginAt is timestamp;
+    }
+
+    // Validation blueprint: UsernameReservation
+    function isValidUsernameReservation(data, usernameKey) {
+      return data.keys().hasAll(['uid', 'username', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'username', 'createdAt'])
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && isValidUsername(data.username)
+        && data.username == usernameKey
+        && data.createdAt == request.time;
+    }
+
+    // Validation blueprint: PromptDocument (promptText now lives in /promptSecrets; kept optional during legacy transition)
+    function isValidPromptData(data, promptId) {
+      return data.keys().hasAll([
+          'id',
+          'title',
+          'imageUrl',
+          'authorUid',
+          'authorUsername',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'title',
+          'shortDescription',
+          'fullDescription',
+          'promptText',
+          'negativePrompt',
+          'category',
+          'imageUrl',
+          'aspectRatio',
+          'authorUid',
+          'authorUsername',
+          'authorType',
+          'authorLabel',
+          'status',
+          'likes',
+          'copies',
+          'views',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id is string && data.id == promptId && isValidId(data.id)
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 120
+        && (!('shortDescription' in data) || (data.shortDescription is string && data.shortDescription.size() <= 300))
+        && (!('fullDescription' in data) || (data.fullDescription is string && data.fullDescription.size() <= 2000))
+        && (!('promptText' in data) || (data.promptText is string && data.promptText.size() >= 10 && data.promptText.size() <= 4000))
+        && (!('negativePrompt' in data) || (data.negativePrompt is string && data.negativePrompt.size() <= 1000))
+        && (!('category' in data) || (data.category is string && data.category.size() <= 60))
+        && data.imageUrl is string && data.imageUrl.size() >= 1 && data.imageUrl.size() <= 500000
+        && (!('aspectRatio' in data) || data.aspectRatio in ['16:9', '4:3', '3:4', '1:1'])
+        && isValidId(data.authorUid)
+        && isValidUsername(data.authorUsername)
+        && (!('authorType' in data) || data.authorType in ['contributor', 'official'])
+        && (!('authorLabel' in data) || (data.authorLabel is string && data.authorLabel.size() <= 80))
+        && data.status in ['approved', 'unpublished', 'pending', 'rejected', 'draft']
+        && (!('likes' in data) || (data.likes is int && data.likes >= 0))
+        && (!('copies' in data) || (data.copies is int && data.copies >= 0))
+        && (!('views' in data) || (data.views is int && data.views >= 0))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation blueprint: PromptSecret (protected AI generation prompt text)
+    function isValidPromptSecret(data, promptId) {
+      return data.keys().hasAll([
+          'id',
+          'promptText',
+          'authorUid',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'promptText',
+          'authorUid',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id is string && data.id == promptId && isValidId(data.id)
+        && data.promptText is string && data.promptText.size() >= 10 && data.promptText.size() <= 4000
+        && isValidId(data.authorUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation blueprint: ContentReport
+    function isValidReportData(data) {
+      return data.keys().hasAll(['promptId', 'reporterUid', 'reason', 'status', 'createdAt'])
+        && data.keys().hasOnly(['promptId', 'reporterUid', 'reason', 'status', 'createdAt'])
+        && isValidId(data.promptId)
+        && isValidId(data.reporterUid)
+        && data.reason is string && data.reason.size() >= 5 && data.reason.size() <= 500
+        && data.status in ['open', 'resolved', 'dismissed']
+        && data.createdAt is timestamp;
+    }
+
+    // Validation blueprint: CategoryConfig
+    function isValidCategoryConfig(data) {
+      return data.keys().hasAll(['name', 'description', 'enabled', 'updatedAt'])
+        && data.keys().hasOnly(['name', 'description', 'enabled', 'updatedAt'])
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 60
+        && data.description is string && data.description.size() >= 5 && data.description.size() <= 300
+        && data.enabled is bool
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation blueprint: AdPlacementZone
+    function isValidAdPlacement(data, placementId) {
+      return data.keys().hasAll([
+          'id',
+          'name',
+          'pageRoute',
+          'slotId',
+          'selector',
+          'elementInfo',
+          'position',
+          'status',
+          'priority',
+          'createdByUid',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'name',
+          'pageRoute',
+          'slotId',
+          'selector',
+          'elementInfo',
+          'position',
+          'status',
+          'priority',
+          'anchorMissing',
+          'createdByUid',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.id is string && data.id == placementId && isValidId(data.id)
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 120
+        && data.pageRoute is string && data.pageRoute.size() >= 1 && data.pageRoute.size() <= 200
+        && data.slotId is string && data.slotId.size() >= 2 && data.slotId.size() <= 120
+        && data.selector is string && data.selector.size() >= 2 && data.selector.size() <= 400
+        && data.elementInfo is string && data.elementInfo.size() >= 2 && data.elementInfo.size() <= 200
+        && data.position in ['before', 'after', 'inside']
+        && data.status in ['active', 'disabled']
+        && data.priority is int && data.priority >= 1 && data.priority <= 999
+        && (!('anchorMissing' in data) || data.anchorMissing is bool)
+        && isValidId(data.createdByUid)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation blueprint: AdCampaign
+    function isValidAdCampaign(data, adId) {
+      return data.keys().hasAll([
+          'id',
+          'name',
+          'provider',
+          'adType',
+          'scriptCode',
+          'placementId',
+          'width',
+          'height',
+          'status',
+          'priority',
+          'createdAt',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'name',
+          'provider',
+          'adType',
+          'scriptCode',
+          'placementId',
+          'placementName',
+          'placement',
+          'customPlacementKey',
+          'width',
+          'height',
+          'status',
+          'priority',
+          'createdAt',
+          'updatedAt',
+          'updatedByUid'
+        ])
+        && data.id is string && data.id == adId && isValidId(data.id)
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 120
+        && data.provider is string && data.provider.size() >= 2 && data.provider.size() <= 80
+        && data.adType in ['banner', 'responsive_banner', 'native_ad', 'popunder', 'custom_html_js', 'other']
+        && data.scriptCode is string && data.scriptCode.size() >= 5 && data.scriptCode.size() <= 50000
+        && isValidId(data.placementId)
+        && (!('placementName' in data) || (data.placementName is string && data.placementName.size() <= 120))
+        && (!('placement' in data) || (data.placement is string && data.placement.size() <= 60))
+        && (!('customPlacementKey' in data) || (data.customPlacementKey is string && data.customPlacementKey.size() <= 60))
+        && data.width is string && data.width.size() >= 1 && data.width.size() <= 20
+        && data.height is string && data.height.size() >= 1 && data.height.size() <= 20
+        && data.status in ['active', 'disabled']
+        && data.priority is int && data.priority >= 1 && data.priority <= 999
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && (!('updatedByUid' in data) || isValidId(data.updatedByUid));
+    }
+
+    // Validation blueprint: SiteSettings
+    function isValidSiteSettings(data) {
+      return data.keys().hasAll(['siteName', 'allowRegistrations', 'requirePromptModeration', 'maintenanceMode', 'updatedAt'])
+        && data.keys().hasOnly(['siteName', 'allowRegistrations', 'requirePromptModeration', 'maintenanceMode', 'updatedAt'])
+        && data.siteName is string && data.siteName.size() >= 2 && data.siteName.size() <= 80
+        && data.allowRegistrations is bool
+        && data.requirePromptModeration is bool
+        && data.maintenanceMode is bool
+        && data.updatedAt is timestamp;
+    }
+
+    // 1. Users collection (Strict PII protection & zero client-side privilege escalation)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      // Client registration can ONLY create a 'contributor' account with 'active' status
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfileData(incoming(), userId)
+        && incoming().role == 'contributor'
+        && incoming().accountStatus == 'active'
+        && request.auth.token.email is string
+        && incoming().email.lower() == request.auth.token.email.lower()
+        && incoming().createdAt == request.time
+        && incoming().lastLoginAt == request.time;
+
+      // Action-based update:
+      // - Owners can only update profile display info & lastLoginAt; role & accountStatus are strictly immutable
+      // - Admins can moderate non-super_admin users without promoting to super_admin
+      // - Super Admins can manage all users via Admin SDK or verified rules
+      allow update: if isValidId(userId)
+        && isValidUserProfileData(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && (
+          (
+            isOwner(userId)
+            && incoming().role == existing().role
+            && incoming().accountStatus == existing().accountStatus
+            && incoming().lastLoginAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'username', 'photoURL', 'bio', 'lastLoginAt'])
+          )
+          ||
+          (
+            isAdmin()
+            && !isSuperAdmin()
+            && existing().role != 'super_admin'
+            && incoming().role == existing().role
+            && incoming().diff(existing()).affectedKeys().hasOnly(['accountStatus'])
+          )
+          ||
+          (
+            isSuperAdmin()
+            && incoming().role in ['admin', 'contributor', 'super_admin']
+            && (userId != request.auth.uid || incoming().role == 'super_admin')
+            && incoming().diff(existing()).affectedKeys().hasOnly(['role', 'accountStatus', 'fullName', 'bio'])
+          )
+        );
+
+      allow delete: if isValidId(userId) && (
+        isOwner(userId)
+        || (isSuperAdmin() && userId != request.auth.uid)
+      );
+    }
+
+    // 2. Non-PII username uniqueness reservation index
+    match /usernames/{username} {
+      allow get: if isValidUsername(username);
+      allow list: if false;
+      allow create: if isSignedIn()
+        && isValidUsername(username)
+        && !exists(/databases/$(database)/documents/usernames/$(username))
+        && isValidUsernameReservation(incoming(), username);
+      allow update: if false;
+      allow delete: if isSignedIn() && isValidUsername(username) && (
+        existing().uid == request.auth.uid || isSuperAdmin()
+      );
+    }
+
+    // 3. Prompts collection (approved prompts readable publicly; pending/rejected/draft restricted to author or Admin)
+    match /prompts/{promptId} {
+      allow get: if isValidId(promptId) && (
+        existing().status == 'approved'
+        || (isSignedIn() && (existing().authorUid == request.auth.uid || isAdmin()))
+      );
+      allow list: if existing().status == 'approved'
+        || (isSignedIn() && (existing().authorUid == request.auth.uid || isAdmin()));
+
+      allow create: if isSignedIn()
+        && isValidId(promptId)
+        && isValidPromptData(incoming(), promptId)
+        && incoming().authorUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isAdmin()
+            && incoming().status in ['approved', 'unpublished', 'pending', 'rejected', 'draft']
+          )
+          || (
+            incoming().status == 'approved'
+            && (!('authorType' in incoming()) || incoming().authorType == 'contributor')
+          )
+        );
+
+      allow update: if isSignedIn()
+        && isValidId(promptId)
+        && isValidPromptData(incoming(), promptId)
+        && incoming().id == existing().id
+        && incoming().authorUid == existing().authorUid
+        && incoming().authorUsername == existing().authorUsername
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (
+            isAdmin()
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title',
+              'shortDescription',
+              'fullDescription',
+              'promptText',
+              'negativePrompt',
+              'category',
+              'imageUrl',
+              'aspectRatio',
+              'authorType',
+              'authorLabel',
+              'status',
+              'updatedAt'
+            ])
+          )
+          || (
+            existing().authorUid == request.auth.uid
+            && incoming().status == existing().status
+            && (!('authorType' in incoming()) || incoming().authorType == 'contributor')
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title',
+              'shortDescription',
+              'fullDescription',
+              'promptText',
+              'negativePrompt',
+              'category',
+              'imageUrl',
+              'aspectRatio',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isSignedIn()
+        && isValidId(promptId)
+        && (existing().authorUid == request.auth.uid || isAdmin());
+    }
+
+    // 3b. Protected Prompt Secrets collection (strictly authenticated get, author, or Admin)
+    match /promptSecrets/{promptId} {
+      allow get: if isValidId(promptId) && isSignedIn() && (
+        isAdmin()
+        || existing().authorUid == request.auth.uid
+        || get(/databases/$(database)/documents/prompts/$(promptId)).data.status == 'approved'
+      );
+      allow list: if isAdmin();
+
+      allow create: if isSignedIn()
+        && isValidId(promptId)
+        && isValidPromptSecret(incoming(), promptId)
+        && incoming().authorUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidId(promptId)
+        && isValidPromptSecret(incoming(), promptId)
+        && incoming().id == existing().id
+        && incoming().authorUid == existing().authorUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (isAdmin() || existing().authorUid == request.auth.uid);
+
+      allow delete: if isSignedIn()
+        && isValidId(promptId)
+        && (existing().authorUid == request.auth.uid || isAdmin());
+    }
+
+    // 3c. Permanent Deletion Audit Records (Admin read-only; written by Server Admin SDK)
+    match /deletedPrompts/{promptId} {
+      allow get, list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+
+    // 4. Content Reports
+    match /reports/{reportId} {
+      allow get: if isValidId(reportId) && (isAdmin() || (isSignedIn() && existing().reporterUid == request.auth.uid));
+      allow list: if isAdmin() || (isSignedIn() && existing().reporterUid == request.auth.uid);
+      allow create: if isSignedIn()
+        && isValidId(reportId)
+        && isValidReportData(incoming())
+        && incoming().reporterUid == request.auth.uid
+        && incoming().status == 'open'
+        && incoming().createdAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(reportId)
+        && isValidReportData(incoming())
+        && incoming().promptId == existing().promptId
+        && incoming().reporterUid == existing().reporterUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+      allow delete: if isAdmin() && isValidId(reportId);
+    }
+
+    // 5. Categories management (public read, admin/super_admin write)
+    match /categories/{categoryId} {
+      allow get, list: if true;
+      allow create, update: if isAdmin()
+        && isValidId(categoryId)
+        && isValidCategoryConfig(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(categoryId);
+    }
+
+    // 6. Visual Ad Placements (strictly Admin & Super Admin; active delivery via verified server API)
+    match /adPlacements/{placementId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(placementId)
+        && isValidAdPlacement(incoming(), placementId)
+        && incoming().createdByUid == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(placementId)
+        && isValidAdPlacement(incoming(), placementId)
+        && incoming().id == existing().id
+        && incoming().createdByUid == existing().createdByUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(placementId);
+    }
+
+    // 7. Ads Manager (strictly Admin & Super Admin; public active delivery via verified server API)
+    match /ads/{adId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(adId)
+        && isValidAdCampaign(incoming(), adId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(adId)
+        && isValidAdCampaign(incoming(), adId)
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+      allow delete: if isAdmin() && isValidId(adId);
+    }
+
+    // 7. Site Settings (Super Admin only)
+    match /siteSettings/{settingId} {
+      allow get: if isValidId(settingId);
+      allow list: if isSuperAdmin();
+      allow create, update: if isSuperAdmin()
+        && isValidId(settingId)
+        && isValidSiteSettings(incoming())
+        && incoming().updatedAt == request.time;
+      allow delete: if false;
+    }
+  }
+}

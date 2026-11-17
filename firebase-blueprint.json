@@ -1,0 +1,576 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user account and role profile stored in Firestore",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Authentication UID matching the document ID"
+        },
+        "fullName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100,
+          "description": "User full display name"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9_]+$",
+          "description": "Unique lowercase alphanumeric handle"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 5,
+          "maxLength": 150,
+          "description": "Verified account email address"
+        },
+        "photoURL": {
+          "type": "string",
+          "maxLength": 1000,
+          "description": "Profile avatar URL"
+        },
+        "bio": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Creator biography"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "admin", "contributor"],
+          "description": "Server-controlled authorization role"
+        },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["active", "suspended"],
+          "description": "Account moderation status"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of initial profile creation"
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest authentication"
+        }
+      },
+      "required": [
+        "uid",
+        "fullName",
+        "username",
+        "email",
+        "photoURL",
+        "bio",
+        "role",
+        "accountStatus",
+        "createdAt",
+        "lastLoginAt"
+      ]
+    },
+    "UsernameReservation": {
+      "title": "UsernameReservation",
+      "description": "Publicly checkable non-PII username uniqueness reservation",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "username", "createdAt"]
+    },
+    "PromptDocument": {
+      "title": "PromptDocument",
+      "description": "Public AI artwork metadata record stored in Firestore (protected generation prompt text lives in /promptSecrets)",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 120
+        },
+        "promptText": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+        },
+        "imageUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500000
+        },
+        "shortDescription": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "fullDescription": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "negativePrompt": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "aspectRatio": {
+          "type": "string",
+          "enum": ["16:9", "4:3", "3:4", "1:1"]
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "authorUsername": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "authorType": {
+          "type": "string",
+          "enum": ["contributor", "official"]
+        },
+        "authorLabel": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "enum": ["approved", "unpublished", "pending", "rejected", "draft"]
+        },
+        "copies": {
+          "type": "number"
+        },
+        "likes": {
+          "type": "number"
+        },
+        "views": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "imageUrl",
+        "authorUid",
+        "authorUsername",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PromptSecret": {
+      "title": "PromptSecret",
+      "description": "Protected AI generation prompt text accessible only to verified authenticated users, the author, and Admins",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "promptText": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 4000
+        },
+        "authorUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "promptText", "authorUid", "createdAt", "updatedAt"]
+    },
+    "DeletedPromptAudit": {
+      "title": "DeletedPromptAudit",
+      "description": "Server-side audit tombstone for permanently deleted prompts (prevents accidental re-seeding without exposing deleted content)",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deletedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "originalAuthorUid": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "originalTitle": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "deletedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "deletedByUid", "deletedAt"]
+    },
+    "ContentReport": {
+      "title": "ContentReport",
+      "description": "User-submitted moderation report on a prompt",
+      "type": "object",
+      "properties": {
+        "promptId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "reporterUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 500
+        },
+        "status": {
+          "type": "string",
+          "enum": ["open", "resolved", "dismissed"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["promptId", "reporterUid", "reason", "status", "createdAt"]
+    },
+    "CategoryConfig": {
+      "title": "CategoryConfig",
+      "description": "Historical category configuration preserved in database",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "description": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 300
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["name", "description", "enabled", "updatedAt"]
+    },
+    "AdPlacementZone": {
+      "title": "AdPlacementZone",
+      "description": "Visually selected advertisement placement anchor on the live ImageLab website",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "pageRoute": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "slotId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 400
+        },
+        "elementInfo": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 200
+        },
+        "position": {
+          "type": "string",
+          "enum": ["before", "after", "inside"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "disabled"]
+        },
+        "priority": {
+          "type": "number"
+        },
+        "anchorMissing": {
+          "type": "boolean"
+        },
+        "createdByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "pageRoute",
+        "slotId",
+        "selector",
+        "elementInfo",
+        "position",
+        "status",
+        "priority",
+        "createdByUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdCampaign": {
+      "title": "AdCampaign",
+      "description": "Dynamic advertisement script bound to a visually selected placement",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "adType": {
+          "type": "string",
+          "enum": [
+            "banner",
+            "responsive_banner",
+            "native_ad",
+            "popunder",
+            "custom_html_js",
+            "other"
+          ]
+        },
+        "scriptCode": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 50000
+        },
+        "placementId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "placementName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "placement": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "customPlacementKey": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "width": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "height": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "disabled"]
+        },
+        "priority": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedByUid": {
+          "type": "string",
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "provider",
+        "adType",
+        "scriptCode",
+        "placementId",
+        "width",
+        "height",
+        "status",
+        "priority",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SiteSettings": {
+      "title": "SiteSettings",
+      "description": "Global site configuration managed exclusively by Super Admin",
+      "type": "object",
+      "properties": {
+        "siteName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "allowRegistrations": {
+          "type": "boolean"
+        },
+        "requirePromptModeration": {
+          "type": "boolean"
+        },
+        "maintenanceMode": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "siteName",
+        "allowRegistrations",
+        "requirePromptModeration",
+        "maintenanceMode",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profiles and role records"
+    },
+    "/usernames/{username}": {
+      "schema": { "$ref": "#/entities/UsernameReservation" },
+      "description": "Non-PII username reservation index for duplicate prevention"
+    },
+    "/prompts/{promptId}": {
+      "schema": { "$ref": "#/entities/PromptDocument" },
+      "description": "Published AI prompt artwork metadata and moderation status"
+    },
+    "/promptSecrets/{promptId}": {
+      "schema": { "$ref": "#/entities/PromptSecret" },
+      "description": "Protected AI generation prompt text accessible only to authenticated users and Admins"
+    },
+    "/deletedPrompts/{promptId}": {
+      "schema": { "$ref": "#/entities/DeletedPromptAudit" },
+      "description": "Admin-only audit tombstones for permanently deleted prompts"
+    },
+    "/reports/{reportId}": {
+      "schema": { "$ref": "#/entities/ContentReport" },
+      "description": "Content moderation reports managed by Admins and Super Admins"
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/CategoryConfig" },
+      "description": "Historical categories collection preserved"
+    },
+    "/adPlacements/{placementId}": {
+      "schema": { "$ref": "#/entities/AdPlacementZone" },
+      "description": "Visually selected advertisement placement anchors managed by Admins and Super Admins"
+    },
+    "/ads/{adId}": {
+      "schema": { "$ref": "#/entities/AdCampaign" },
+      "description": "Advertisement campaigns managed by Admins and Super Admins"
+    },
+    "/siteSettings/{settingId}": {
+      "schema": { "$ref": "#/entities/SiteSettings" },
+      "description": "Global website settings editable exclusively by Super Admin"
+    }
+  }
+}
