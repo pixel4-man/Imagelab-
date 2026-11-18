@@ -23,7 +23,6 @@ import {
 } from './src/types/ads.ts';
 import { SEEDED_PROMPT_SECRETS } from './src/server/seededPromptSecrets.ts';
 import { READY_MADE_PROMPTS } from './src/server/seededPromptsData.ts';
-import { buildAllowedOrigins, isOriginAllowed } from './src/server/cors.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -510,6 +509,60 @@ async function requireRole(allowedRoles: UserRole[]) {
       res.status(500).json({ error: 'Unable to verify user permissions.' });
     }
   };
+}
+
+function buildAllowedOrigins(options: {
+  allowedOrigins?: string;
+  appUrl?: string;
+  siteUrl?: string;
+  nodeEnv?: string;
+}): string[] {
+  const entries = new Set<string>();
+  const addOrigin = (raw: string | undefined) => {
+    const trimmed = (raw || '').trim().replace(/\/+$/, '');
+    if (!trimmed || trimmed === '*') return;
+    entries.add(trimmed);
+  };
+
+  if (options.allowedOrigins) {
+    for (const part of options.allowedOrigins.split(',')) {
+      addOrigin(part);
+    }
+  }
+  addOrigin(options.appUrl);
+  addOrigin(options.siteUrl);
+
+  if (options.nodeEnv !== 'production') {
+    entries.add('http://localhost:3000');
+    entries.add('http://127.0.0.1:3000');
+    entries.add('http://localhost:5173');
+    entries.add('http://127.0.0.1:5173');
+  }
+
+  return Array.from(entries);
+}
+
+function isOriginAllowed(
+  originHeader: string | undefined,
+  allowedOrigins: string[]
+): { allowed: boolean; allowOriginHeader: string | null } {
+  if (!originHeader) {
+    return { allowed: true, allowOriginHeader: null };
+  }
+  const normalizedOrigin = originHeader.trim().replace(/\/+$/, '');
+  for (const pattern of allowedOrigins) {
+    if (!pattern || pattern === '*') continue;
+    if (pattern === normalizedOrigin) {
+      return { allowed: true, allowOriginHeader: originHeader };
+    }
+    if (pattern.includes('*')) {
+      const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[a-z0-9-]+');
+      if (new RegExp(`^${escaped}$`, 'i').test(normalizedOrigin)) {
+        return { allowed: true, allowOriginHeader: originHeader };
+      }
+    }
+  }
+  return { allowed: false, allowOriginHeader: null };
 }
 
 async function startServer() {

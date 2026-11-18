@@ -1,5 +1,5 @@
-import { PromptItem } from '../types/prompt';
-import { SEEDED_PROMPT_SECRETS } from './seededPromptSecrets';
+import type { PromptItem } from '../types/prompt.ts';
+import { SEEDED_PROMPT_SECRETS } from './seededPromptSecrets.ts';
 
 export const RAW_READY_MADE_PROMPTS: PromptItem[] = [
   {

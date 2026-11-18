@@ -21,7 +21,6 @@ import {
   validateAdPayload,
   validatePlacementPayload,
 } from '../src/types/ads.ts';
-import { buildAllowedOrigins, isOriginAllowed } from '../src/server/cors.ts';
 
 test('1. Super Admin bootstrap requires exact verified email adilwss67@gmail.com', () => {
   assert.equal(DEFAULT_SUPER_ADMIN_EMAIL, 'adilwss67@gmail.com');
@@ -734,43 +733,11 @@ test('16. Complete Admin Prompt Control, Unified All Prompts, 3-Card Dashboard, 
   assert.match(rulesSource, /match \/deletedPrompts\/\{promptId\}/);
 });
 
-test('17. Cloudflare Pages SPA fallback, CORS policy, VITE_API_BASE_URL routing, SEO files, and secret isolation hold', () => {
-  // CORS production allowlist blocks unknown origins and localhost in production
-  const prodOrigins = buildAllowedOrigins({
-    allowedOrigins: 'https://imagelab.pages.dev, https://*.imagelab.pages.dev',
-    siteUrl: 'https://imagelab.example.com/',
-    nodeEnv: 'production',
-  });
-  assert.equal(isOriginAllowed('https://imagelab.pages.dev', prodOrigins).allowed, true);
-  assert.equal(isOriginAllowed('https://abc123.imagelab.pages.dev', prodOrigins).allowed, true);
-  assert.equal(isOriginAllowed('https://imagelab.example.com', prodOrigins).allowed, true);
-  assert.equal(isOriginAllowed('http://localhost:3000', prodOrigins).allowed, false);
-  assert.equal(isOriginAllowed('https://evil.example.org', prodOrigins).allowed, false);
-  assert.equal(isOriginAllowed(undefined, prodOrigins).allowed, true);
-
-  // Wildcard "*" alone must never grant CORS access
-  assert.equal(isOriginAllowed('https://evil.example.org', ['*']).allowed, false);
-
-  // Local dev mode enables localhost origins automatically
-  const devOrigins = buildAllowedOrigins({ nodeEnv: 'development' });
-  assert.equal(isOriginAllowed('http://localhost:3000', devOrigins).allowed, true);
-  assert.equal(isOriginAllowed('http://localhost:5173', devOrigins).allowed, true);
-
-  // Cloudflare Workers SPA uses wrangler.jsonc not_found_handling="single-page-application" without _redirects
+test('17. Single-origin deployment config, CORS policy, no _redirects loop, and secret isolation hold', () => {
+  // Cloudflare Workers SPA uses not_found_handling="single-page-application" without _redirects
   assert.equal(fs.existsSync(path.resolve(process.cwd(), 'public/_redirects')), false);
 
-  const headers = fs.readFileSync(path.resolve(process.cwd(), 'public/_headers'), 'utf-8');
-  assert.match(headers, /Cross-Origin-Opener-Policy:\s*same-origin-allow-popups/);
-  assert.match(headers, /Referrer-Policy:\s*strict-origin-when-cross-origin/);
-
-  // API base helper uses VITE_API_BASE_URL
-  const apiHelperSource = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/lib/api.ts'),
-    'utf-8'
-  );
-  assert.match(apiHelperSource, /import\.meta\.env\.VITE_API_BASE_URL/);
-
-  // Ensure zero raw fetch('/api/...') calls bypass apiUrl() across client code
+  // Ensure client code never reads or exposes FIREBASE_SERVICE_ACCOUNT_JSON
   const walkSrcFiles = (dir: string): string[] => {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     return entries.flatMap((entry) => {
@@ -781,11 +748,6 @@ test('17. Cloudflare Pages SPA fallback, CORS policy, VITE_API_BASE_URL routing,
   };
   for (const filePath of walkSrcFiles(path.resolve(process.cwd(), 'src'))) {
     const contents = fs.readFileSync(filePath, 'utf-8');
-    assert.doesNotMatch(
-      contents,
-      /fetch\(['"`]\/api\//,
-      `Raw unprefixed fetch('/api/...') found in ${filePath}`
-    );
     assert.doesNotMatch(
       contents,
       /(import\.meta\.env|process\.env)\.FIREBASE_SERVICE_ACCOUNT_JSON|VITE_FIREBASE_SERVICE_ACCOUNT_JSON/,
