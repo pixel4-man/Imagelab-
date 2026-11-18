@@ -1,12 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { AdRecord, VisualPlacementRecord, normalizePageRoute } from '../types/ads';
+import { ActiveAdState, fetchPublicActiveAds } from '../lib/adsPersistence';
+import { AdRecord, normalizePageRoute } from '../types/ads';
 
 export const ADS_UPDATED_EVENT = 'imagelab-ads-updated';
-
-export interface ActiveAdState {
-  placements: VisualPlacementRecord[];
-  ads: AdRecord[];
-}
+export type { ActiveAdState };
 
 let cachedActiveState: ActiveAdState | null = null;
 let inflightStateRequest: Promise<ActiveAdState> | null = null;
@@ -17,21 +14,13 @@ export function notifyActiveAdsUpdated() {
   window.dispatchEvent(new CustomEvent(ADS_UPDATED_EVENT));
 }
 
+// Queries /api/ads/active first, with active-only Firestore publicAdSlots fallback on static hosts
 export async function fetchActiveAdState(): Promise<ActiveAdState> {
   if (cachedActiveState) return cachedActiveState;
   if (inflightStateRequest) return inflightStateRequest;
 
-  inflightStateRequest = fetch('/api/ads/active', { cache: 'no-store' })
-    .then(async (res) => {
-      if (!res.ok) return { placements: [], ads: [] } as ActiveAdState;
-      const payload = (await res.json()) as {
-        placements?: VisualPlacementRecord[];
-        ads?: AdRecord[];
-      };
-      const next: ActiveAdState = {
-        placements: Array.isArray(payload.placements) ? payload.placements : [],
-        ads: Array.isArray(payload.ads) ? payload.ads : [],
-      };
+  inflightStateRequest = fetchPublicActiveAds()
+    .then((next) => {
       cachedActiveState = next;
       return next;
     })

@@ -3,10 +3,24 @@ import { Link } from 'react-router-dom';
 import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
 import { SafeImage } from '../components/SafeImage';
+import { SeoHead, resolveCanonicalOrigin } from '../components/SeoHead';
 
 export function AboutPage() {
+  const canonicalOrigin = resolveCanonicalOrigin();
+
   return (
     <PageTransition>
+      <SeoHead
+        title="About ImageLab — Open AI Visual Craft Studio"
+        description="Learn how ImageLab brings creators, designers, and visual explorers together around curated AI imagery and prompt craft."
+        canonicalPath="/about"
+        structuredData={{
+          '@context': 'https://schema.org',
+          '@type': 'AboutPage',
+          name: 'About ImageLab',
+          url: `${canonicalOrigin}/about`,
+        }}
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16 space-y-12">
         <div>
           <BackButton fallbackTo="/" label="Back" />

@@ -16,11 +16,17 @@ import {
   ProfileEnsureCoordinator,
 } from '../src/lib/profileSync.ts';
 import {
+  findDuplicatePlacement,
+  formatReadableError,
   normalizePageRoute,
   normalizeSlotIdentifier,
   validateAdPayload,
   validatePlacementPayload,
 } from '../src/types/ads.ts';
+import {
+  callJsonApiWithFallback,
+  isJsonContentType,
+} from '../src/lib/adsApiClient.ts';
 
 test('1. Super Admin bootstrap requires exact verified email adilwss67@gmail.com', () => {
   assert.equal(DEFAULT_SUPER_ADMIN_EMAIL, 'adilwss67@gmail.com');
@@ -772,3 +778,256 @@ test('17. Single-origin deployment config, CORS policy, no _redirects loop, and 
   assert.equal(fs.existsSync(path.resolve(process.cwd(), 'storage.rules')), true);
 });
 
+test('18. Production SEO, sitemap.xml, robots.txt, canonicals, and prompt-secret protection hold', async () => {
+  const seoMod = await import('../scripts/generate-seo-files.mjs');
+  const origin = seoMod.DEFAULT_PRODUCTION_ORIGIN;
+  assert.equal(origin, 'https://imagelab.imagemart.workers.dev');
+
+  const xml = seoMod.buildSitemapXml(origin, [
+    { id: 'travertine-solstice-atrium', lastmod: '2026-11-15' },
+    { id: 'harbor-line-number-twelve', lastmod: '2026-11-15' },
+  ]);
+  assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
+  assert.match(xml, /<urlset xmlns="http:\/\/www\.sitemaps\.org\/schemas\/sitemap\/0\.9">/);
+  assert.match(xml, /<loc>https:\/\/imagelab\.imagemart\.workers\.dev\/<\/loc>/);
+  assert.match(xml, /<loc>https:\/\/imagelab\.imagemart\.workers\.dev\/explore<\/loc>/);
+  assert.match(
+    xml,
+    /<loc>https:\/\/imagelab\.imagemart\.workers\.dev\/prompt\/travertine-solstice-atrium<\/loc>/
+  );
+
+  for (const excludedPath of [
+    '/login',
+    '/signup',
+    '/admin',
+    '/super-admin',
+    '/dashboard',
+    '/profile',
+    '/saved',
+    '/publish',
+  ]) {
+    assert.equal(
+      xml.includes(`<loc>${origin}${excludedPath}</loc>`),
+      false,
+      `Sitemap must exclude non-public route ${excludedPath}`
+    );
+  }
+
+  const robots = seoMod.buildRobotsTxt(origin);
+  assert.match(robots, /^User-agent: \*\nAllow: \/$/m);
+  assert.match(robots, /^Sitemap: https:\/\/imagelab\.imagemart\.workers\.dev\/sitemap\.xml$/m);
+  assert.match(robots, /^Disallow: \/admin$/m);
+  assert.match(robots, /^Disallow: \/login$/m);
+
+  const indexHtml = fs.readFileSync(path.resolve(process.cwd(), 'index.html'), 'utf-8');
+  assert.match(indexHtml, /MqbzvNYBpO-LGkngxFkhthpJM3LTD-pV8elm2ROLjKU/);
+  assert.match(
+    indexHtml,
+    /<link rel="canonical" href="https:\/\/imagelab\.imagemart\.workers\.dev\/" \/>/
+  );
+  assert.match(indexHtml, /application\/ld\+json/);
+
+  const headersFile = fs.readFileSync(path.resolve(process.cwd(), 'public/_headers'), 'utf-8');
+  assert.match(headersFile, /\/sitemap\.xml[\s\S]*Content-Type: application\/xml; charset=utf-8/);
+  assert.match(headersFile, /\/robots\.txt[\s\S]*Content-Type: text\/plain; charset=utf-8/);
+  assert.equal(fs.existsSync(path.resolve(process.cwd(), 'public/_redirects')), false);
+
+  // PromptDetailsPage SEO metadata must never leak protected promptText into meta or JSON-LD
+  const detailsSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/pages/PromptDetailsPage.tsx'),
+    'utf-8'
+  );
+  const seoHeadSlice = detailsSource.slice(
+    detailsSource.lastIndexOf('<SeoHead'),
+    detailsSource.lastIndexOf('<div className="max-w-7xl')
+  );
+  assert.match(seoHeadSlice, /noindex=\{!isPublished\}/);
+  assert.doesNotMatch(seoHeadSlice, /promptText/);
+});
+
+test('19. Visual placement persistence fixes HTML SPA fallback, enforces dimensions/adType, prevents duplicates, and surfaces real errors', async () => {
+  // 1. Dimensions & AdType validation
+  const withDims = validatePlacementPayload({
+    name: 'Homepage Banner Zone',
+    pageRoute: '/',
+    slotId: 'homepage_hero',
+    selector: '[data-ad-slot="homepage_hero"]',
+    elementInfo: 'Hero (<section>)',
+    position: 'after',
+    width: '728px',
+    height: '90px',
+    adType: 'banner',
+    status: 'active',
+    priority: 5,
+  });
+  assert.equal(withDims.valid, true);
+  assert.equal(withDims.sanitized?.width, '728px');
+  assert.equal(withDims.sanitized?.height, '90px');
+  assert.equal(withDims.sanitized?.adType, 'banner');
+
+  const badWidth = validatePlacementPayload({
+    name: 'Bad Width Zone',
+    pageRoute: '/',
+    slotId: 'homepage_hero',
+    selector: '[data-ad-slot="homepage_hero"]',
+    elementInfo: 'Hero (<section>)',
+    position: 'after',
+    width: 'expression(alert(1))',
+    height: '90px',
+    adType: 'banner',
+    status: 'active',
+    priority: 5,
+  });
+  assert.equal(badWidth.valid, false);
+
+  // 2. Duplicate placement prevention
+  const existing = [
+    {
+      id: 'plc_existing_1',
+      name: 'Homepage Below Hero',
+      pageRoute: '/',
+      slotId: 'homepage_hero',
+      selector: '[data-ad-slot="homepage_hero"]',
+      position: 'after' as const,
+    },
+  ];
+  const dup = findDuplicatePlacement(
+    {
+      pageRoute: '/',
+      slotId: 'homepage_hero',
+      selector: '[data-ad-slot="homepage_hero"]',
+      position: 'after',
+    },
+    existing
+  );
+  assert.equal(dup?.id, 'plc_existing_1');
+  assert.equal(
+    findDuplicatePlacement(
+      {
+        pageRoute: '/',
+        slotId: 'homepage_hero',
+        selector: '[data-ad-slot="homepage_hero"]',
+        position: 'after',
+      },
+      existing,
+      'plc_existing_1'
+    ),
+    null
+  );
+  assert.equal(
+    findDuplicatePlacement(
+      {
+        pageRoute: '/',
+        slotId: 'homepage_hero',
+        selector: '[data-ad-slot="homepage_hero"]',
+        position: 'before',
+      },
+      existing
+    ),
+    null
+  );
+
+  // 3. Readable error formatting unwraps JSON FirestoreErrorInfo cleanly
+  assert.equal(
+    formatReadableError(
+      new Error(
+        JSON.stringify({
+          error: 'Missing or insufficient permissions.',
+          operationType: 'create',
+          path: 'adPlacements/plc_1',
+        })
+      )
+    ),
+    'Missing or insufficient permissions. (create adPlacements/plc_1)'
+  );
+  assert.equal(
+    formatReadableError(new Error('Admin privileges required.'), 'Fallback'),
+    'Admin privileges required.'
+  );
+
+  // 4. API client detects Cloudflare HTML SPA fallback & 503, refreshes expired 401 token, and propagates backend JSON errors
+  assert.equal(isJsonContentType('text/html; charset=utf-8'), false);
+  assert.equal(isJsonContentType('application/json; charset=utf-8'), true);
+
+  const htmlFallbackResult = await callJsonApiWithFallback('/api/admin/placements', {
+    method: 'POST',
+    body: { name: 'Test' },
+    requireAuth: true,
+    getIdToken: async () => 'token-1',
+    fetchImpl: async () =>
+      new Response('<!doctype html><html><body>SPA</body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }),
+  });
+  assert.equal(htmlFallbackResult.apiUnavailable, true);
+
+  const adminSdkMissingResult = await callJsonApiWithFallback('/api/admin/placements', {
+    method: 'POST',
+    body: { name: 'Test' },
+    requireAuth: true,
+    getIdToken: async () => 'token-1',
+    fetchImpl: async () =>
+      new Response(JSON.stringify({ error: 'Server Admin SDK credentials are not configured.' }), {
+        status: 503,
+        headers: { 'content-type': 'application/json' },
+      }),
+  });
+  assert.equal(adminSdkMissingResult.apiUnavailable, true);
+
+  let tokenCalls = 0;
+  let attempt = 0;
+  const refreshedResult = await callJsonApiWithFallback<{ placement: { id: string } }>(
+    '/api/admin/placements',
+    {
+      method: 'POST',
+      body: { name: 'Test' },
+      requireAuth: true,
+      getIdToken: async (forceRefresh) => {
+        tokenCalls += 1;
+        return forceRefresh ? 'fresh-token' : 'stale-token';
+      },
+      fetchImpl: async (_input, init) => {
+        attempt += 1;
+        const authHeader = (init?.headers as Record<string, string>)?.Authorization;
+        if (attempt === 1) {
+          assert.equal(authHeader, 'Bearer stale-token');
+          return new Response(JSON.stringify({ error: 'Token expired.' }), {
+            status: 401,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        assert.equal(authHeader, 'Bearer fresh-token');
+        return new Response(JSON.stringify({ placement: { id: 'plc_123' } }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    }
+  );
+  assert.equal(tokenCalls, 2);
+  assert.equal(refreshedResult.apiUnavailable, false);
+  assert.equal(refreshedResult.data?.placement.id, 'plc_123');
+
+  await assert.rejects(
+    callJsonApiWithFallback('/api/admin/placements', {
+      method: 'POST',
+      body: { name: 'Dup' },
+      requireAuth: true,
+      getIdToken: async () => 'token-1',
+      fetchImpl: async () =>
+        new Response(JSON.stringify({ error: 'A placement named "Hero" already exists.' }), {
+          status: 409,
+          headers: { 'content-type': 'application/json' },
+        }),
+    }),
+    /A placement named "Hero" already exists\./
+  );
+
+  // 5. Server duplicate check & publicAdSlots sync present
+  const serverSource = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
+  assert.match(serverSource, /findDuplicatePlacement/);
+  assert.match(serverSource, /res\.status\(409\)\.json/);
+  assert.match(serverSource, /syncPublicAdSlotAdmin/);
+  assert.match(serverSource, /syncPublicAdSlotsForPlacementAdmin/);
+});

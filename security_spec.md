@@ -9,6 +9,7 @@
 6. **Super Admin Protection**: Normal Admins cannot modify, demote, or delete any user whose role is `"super_admin"`, nor promote any user to `"super_admin"`. Only server-side Admin SDK calls verified against a `super_admin` token can manage admin roles, and `siteSettings` writes are restricted exclusively to `super_admin`.
 7. **Prompt Ownership & Moderation**: Public users can read `"approved"` prompts. Contributors can create prompts with `authorUid == request.auth.uid`, and edit/delete only their own prompts without changing `authorUid` or `status`. Admins and Super Admins can approve, reject, or remove any prompt.
 8. **Strict Key Allowlisting & Size Bounds**: Every `create` uses `hasAll` + `hasOnly`, every `update` uses `affectedKeys().hasOnly(...)`, every string has a `.size()` bound, and every timestamp enforces `request.time`.
+9. **Ads Manager & Visual Placements Isolation**: `/adPlacements/{placementId}` and `/ads/{adId}` are strictly restricted (`get`, `list`, `create`, `update`, `delete`) to verified active Admins and Super Admins (`isAdmin()`). Disabled or draft ad scripts are never readable publicly. `/publicAdSlots/{adId}` may only be created/updated/deleted by `isAdmin()` with `status == 'active'` for active public slot delivery.
 
 ## 2. The "Dirty Dozen" Adversarial Payloads
 1. **Self-Admin Registration**: `create /users/attacker` with `{ role: "admin" }` -> `PERMISSION_DENIED`.

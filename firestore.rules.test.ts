@@ -34,6 +34,19 @@ test('Dirty Dozen Blueprint & Rules Coverage Verification', async () => {
   assert.ok(rules.includes('affectedKeys().hasOnly(['), 'Updates must restrict affectedKeys');
   assert.ok(rules.includes('isValidId('), 'Single-document operations must validate ID format');
   assert.ok(!rules.includes('allow read: if isSignedIn();'), 'Blanket signed-in reads are forbidden');
+
+  // Ads Manager & Visual Placements Security Invariants
+  assert.match(rules, /match \/adPlacements\/\{placementId\}[\s\S]*allow get, list: if isAdmin\(\)/);
+  assert.match(rules, /isValidAdPlacement[\s\S]*'width'[\s\S]*'height'[\s\S]*'adType'/);
+  assert.match(rules, /match \/ads\/\{adId\}[\s\S]*allow get, list: if isAdmin\(\)/);
+  assert.match(
+    rules,
+    /match \/publicAdSlots\/\{adId\}[\s\S]*allow get: if isValidId\(adId\) && existing\(\)\.status == 'active'/
+  );
+  assert.match(
+    rules,
+    /match \/publicAdSlots\/\{adId\}[\s\S]*allow create: if isAdmin\(\)[\s\S]*incoming\(\)\.status == 'active'/
+  );
 });
 
 test('Live Firestore Emulator Dirty Dozen Suite (runs when emulator host is configured)', async (t) => {

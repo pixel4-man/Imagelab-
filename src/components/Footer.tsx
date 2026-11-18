@@ -140,6 +140,10 @@ export function Footer() {
             <Link to="/contact" className="hover:text-[#F4EDE4] transition-colors">
               Contact
             </Link>
+            <span aria-hidden="true">·</span>
+            <a href="/sitemap.xml" className="hover:text-[#F4EDE4] transition-colors">
+              Sitemap
+            </a>
           </div>
         </div>
       </div>

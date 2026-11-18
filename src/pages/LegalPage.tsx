@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
+import { SeoHead } from '../components/SeoHead';
 
 interface LegalPageProps {
   type: 'privacy' | 'terms';
@@ -11,6 +12,15 @@ export function LegalPage({ type }: LegalPageProps) {
 
   return (
     <PageTransition>
+      <SeoHead
+        title={isPrivacy ? 'Privacy Policy — ImageLab' : 'Terms of Service — ImageLab'}
+        description={
+          isPrivacy
+            ? 'Read the ImageLab Privacy Policy covering local preferences, creator accounts, and data protection practices.'
+            : 'Review the ImageLab Terms of Service covering attribution, community standards, and prompt publishing.'
+        }
+        canonicalPath={isPrivacy ? '/privacy' : '/terms'}
+      />
       <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16">
         <div className="mb-5">
           <BackButton fallbackTo="/" label="Back" />

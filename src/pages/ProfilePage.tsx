@@ -16,6 +16,7 @@ import { EmptyState } from '../components/FeedbackStates';
 import { PageTransition } from '../components/PageTransition';
 import { PromptCard } from '../components/PromptCard';
 import { SafeImage } from '../components/SafeImage';
+import { SeoHead } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
@@ -210,6 +211,24 @@ export function ProfilePage() {
 
   return (
     <PageTransition>
+      <SeoHead
+        title={
+          isViewingOwnPrivateProfile
+            ? 'Your Creator Profile — ImageLab'
+            : `${displayNameValue || usernameValue} (@${usernameValue}) — ImageLab Creator`
+        }
+        description={
+          isViewingOwnPrivateProfile
+            ? 'Manage your private ImageLab creator profile.'
+            : `Browse AI artworks and visual prompt studies published by @${usernameValue} on ImageLab.`
+        }
+        canonicalPath={
+          isViewingOwnPrivateProfile
+            ? '/profile'
+            : `/creator/${encodeURIComponent(usernameValue)}`
+        }
+        noindex={isViewingOwnPrivateProfile}
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16">
         <div className="mb-5">
           <BackButton fallbackTo="/" label="Back" />

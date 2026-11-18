@@ -35,6 +35,7 @@ import { AdsManagerWorkspace } from '../components/AdsManagerWorkspace';
 import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
 import { SafeImage } from '../components/SafeImage';
+import { SeoHead } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { auth, db } from '../lib/firebase';
@@ -329,7 +330,13 @@ export function AdminDashboardPage() {
           : null
       )
       .then(async (res) => {
-        if (!res || !res.ok) return;
+        if (
+          !res ||
+          !res.ok ||
+          !res.headers.get('content-type')?.toLowerCase().includes('application/json')
+        ) {
+          return;
+        }
         const payload = (await res.json()) as { ads?: { status?: string }[] };
         if (Array.isArray(payload.ads)) {
           setActiveAdsCount(payload.ads.filter((a) => a.status === 'active').length);
@@ -857,6 +864,12 @@ export function AdminDashboardPage() {
 
   return (
     <PageTransition>
+      <SeoHead
+        title="Admin Dashboard — ImageLab"
+        description="Administrative moderation workspace for ImageLab."
+        canonicalPath="/admin"
+        noindex
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16 space-y-8">
         <div className="flex items-center justify-between gap-4">
           <BackButton fallbackTo="/" label="Back" />

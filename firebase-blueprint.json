@@ -361,6 +361,25 @@
           "type": "string",
           "enum": ["before", "after", "inside"]
         },
+        "width": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "height": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "adType": {
+          "type": "string",
+          "enum": [
+            "banner",
+            "responsive_banner",
+            "native_ad",
+            "popunder",
+            "custom_html_js",
+            "other"
+          ]
+        },
         "status": {
           "type": "string",
           "enum": ["active", "disabled"]
@@ -498,6 +517,123 @@
         "updatedAt"
       ]
     },
+    "PublicAdSlot": {
+      "title": "PublicAdSlot",
+      "description": "Published active-only ad creative joined with its active visual placement for public website rendering without exposing disabled ads or admin records",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "adId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "placementId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "placementName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "pageRoute": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "slotId": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 400
+        },
+        "position": {
+          "type": "string",
+          "enum": ["before", "after", "inside"]
+        },
+        "placementPriority": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "adType": {
+          "type": "string",
+          "enum": [
+            "banner",
+            "responsive_banner",
+            "native_ad",
+            "popunder",
+            "custom_html_js",
+            "other"
+          ]
+        },
+        "scriptCode": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 50000
+        },
+        "width": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "height": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "priority": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active"]
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "adId",
+        "placementId",
+        "placementName",
+        "pageRoute",
+        "slotId",
+        "selector",
+        "position",
+        "placementPriority",
+        "name",
+        "provider",
+        "adType",
+        "scriptCode",
+        "width",
+        "height",
+        "priority",
+        "status",
+        "updatedAt"
+      ]
+    },
     "SiteSettings": {
       "title": "SiteSettings",
       "description": "Global site configuration managed exclusively by Super Admin",
@@ -567,6 +703,10 @@
     "/ads/{adId}": {
       "schema": { "$ref": "#/entities/AdCampaign" },
       "description": "Advertisement campaigns managed by Admins and Super Admins"
+    },
+    "/publicAdSlots/{adId}": {
+      "schema": { "$ref": "#/entities/PublicAdSlot" },
+      "description": "Active-only rendered advertisement slots synced by Admins for public display"
     },
     "/siteSettings/{settingId}": {
       "schema": { "$ref": "#/entities/SiteSettings" },

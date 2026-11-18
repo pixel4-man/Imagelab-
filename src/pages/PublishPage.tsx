@@ -13,6 +13,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
 import { SafeImage } from '../components/SafeImage';
+import { SeoHead } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
@@ -202,6 +203,12 @@ export function PublishPage() {
   if (!authReady) {
     return (
       <PageTransition>
+        <SeoHead
+          title="Publish a Prompt — ImageLab"
+          description="Share an AI creation and prompt on ImageLab."
+          canonicalPath="/publish"
+          noindex
+        />
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
           <div className="rounded-3xl bg-[#FAF7F2] border border-[#264653]/10 p-10 animate-pulse space-y-4">
             <div className="h-4 w-36 bg-[#E8DEC8] rounded" />
@@ -216,6 +223,12 @@ export function PublishPage() {
   if (!firebaseUser) {
     return (
       <PageTransition>
+        <SeoHead
+          title="Publish a Prompt — ImageLab"
+          description="Sign in to publish an AI creation on ImageLab."
+          canonicalPath="/publish"
+          noindex
+        />
         <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-20 space-y-6">
           <BackButton fallbackTo="/" label="Back" />
           <div className="rounded-3xl bg-[#FAF7F2] border border-[#264653]/12 p-8 sm:p-10 text-center space-y-5 shadow-sm">
@@ -250,6 +263,12 @@ export function PublishPage() {
 
   return (
     <PageTransition>
+      <SeoHead
+        title="Publish a Prompt — ImageLab"
+        description="Upload AI artwork and attach your generation prompt on ImageLab."
+        canonicalPath="/publish"
+        noindex
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16">
         <div className="mb-5">
           <BackButton fallbackTo="/" label="Back" />

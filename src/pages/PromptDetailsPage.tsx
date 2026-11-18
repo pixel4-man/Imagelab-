@@ -23,6 +23,11 @@ import { EmptyState } from '../components/FeedbackStates';
 import { PageTransition } from '../components/PageTransition';
 import { PromptCard } from '../components/PromptCard';
 import { SafeImage } from '../components/SafeImage';
+import {
+  SeoHead,
+  resolveAbsoluteUrl,
+  resolveCanonicalOrigin,
+} from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { db } from '../lib/firebase';
@@ -405,6 +410,12 @@ export function PromptDetailsPage() {
     if (loadingDetails) {
       return (
         <PageTransition>
+          <SeoHead
+            title="Loading Artwork — ImageLab"
+            description="Inspect curated AI artwork and creator details on ImageLab."
+            canonicalPath={id ? `/prompt/${encodeURIComponent(id)}` : '/explore'}
+            noindex
+          />
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-20 space-y-6">
             <BackButton fallbackTo="/explore" label="Back" />
             <div className="rounded-3xl bg-[#FAF7F2] border border-[#264653]/12 p-12 text-center text-sm font-sans text-[#264653]/70">
@@ -417,6 +428,12 @@ export function PromptDetailsPage() {
 
     return (
       <PageTransition>
+        <SeoHead
+          title="Artwork Not Found — ImageLab"
+          description="This artwork may have been unpublished or removed. Explore curated AI creations on ImageLab."
+          canonicalPath="/explore"
+          noindex
+        />
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-20 space-y-6">
           <BackButton fallbackTo="/explore" label="Back" />
           <EmptyState
@@ -436,9 +453,36 @@ export function PromptDetailsPage() {
   const isSaved = savedIds.includes(prompt.id);
   const isCopied = copiedId === prompt.id;
   const isPublished = (prompt.status || 'approved') === 'approved';
+  const canonicalOrigin = resolveCanonicalOrigin();
+  const canonicalPromptPath = `/prompt/${encodeURIComponent(prompt.id)}`;
 
   return (
     <PageTransition>
+      <SeoHead
+        title={`${prompt.title} — ImageLab AI Artwork`}
+        description={`Inspect "${prompt.title}" by @${creator.username} on ImageLab. View full-resolution AI artwork and creator details.`}
+        canonicalPath={canonicalPromptPath}
+        noindex={!isPublished}
+        ogType="article"
+        imageUrl={prompt.imageUrl}
+        structuredData={
+          isPublished
+            ? {
+                '@context': 'https://schema.org',
+                '@type': 'ImageObject',
+                name: prompt.title,
+                url: `${canonicalOrigin}${canonicalPromptPath}`,
+                contentUrl: resolveAbsoluteUrl(canonicalOrigin, prompt.imageUrl),
+                datePublished: prompt.createdAt,
+                creator: {
+                  '@type': 'Person',
+                  name: creator.displayName,
+                  alternateName: `@${creator.username}`,
+                },
+              }
+            : undefined
+        }
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16 font-sans">
         {/* Back Control */}
         <div className="flex flex-wrap items-center justify-between gap-4 mb-6">

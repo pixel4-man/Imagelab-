@@ -11,6 +11,7 @@ import {
 import { Link } from 'react-router-dom';
 import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
+import { SeoHead } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { auth, db } from '../lib/firebase';
@@ -130,6 +131,12 @@ export function SuperAdminDashboardPage() {
 
   return (
     <PageTransition>
+      <SeoHead
+        title="Super Admin Console — ImageLab"
+        description="System-wide administration console for ImageLab."
+        canonicalPath="/super-admin"
+        noindex
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16 space-y-8">
         <div>
           <BackButton fallbackTo="/admin" label="Back" />

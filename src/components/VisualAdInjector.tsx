@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { updateVisualPlacementAnchorStatus } from '../lib/adsPersistence';
 import { AdRecord, VisualPlacementRecord } from '../types/ads';
 import {
   ADS_UPDATED_EVENT,
@@ -48,7 +49,7 @@ function findAnchorElement(placement: VisualPlacementRecord): HTMLElement | null
 
 export function VisualAdInjector() {
   const location = useLocation();
-  const { authReady, firebaseUser, userProfile } = useAuth();
+  const { authReady, firebaseUser, userProfile, getIdToken } = useAuth();
   const [adState, setAdState] = useState<ActiveAdState>({ placements: [], ads: [] });
   const [mountedPortals, setMountedPortals] = useState<MountedSlotPortal[]>([]);
   const anchorSyncReportedRef = useRef<Set<string>>(new Set());
@@ -77,22 +78,9 @@ export function VisualAdInjector() {
       const cacheKey = `${placementId}:${anchorMissing ? 'missing' : 'ok'}`;
       if (anchorSyncReportedRef.current.has(cacheKey)) return;
       anchorSyncReportedRef.current.add(cacheKey);
-      try {
-        const token = await firebaseUser?.getIdToken();
-        if (!token) return;
-        await fetch(`/api/admin/placements/${placementId}`, {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({ anchorMissing }),
-        });
-      } catch {
-        // Non-blocking anchor status diagnostic sync
-      }
+      await updateVisualPlacementAnchorStatus(placementId, anchorMissing, getIdToken);
     },
-    [isPrivilegedAdmin, firebaseUser]
+    [isPrivilegedAdmin, getIdToken]
   );
 
   useEffect(() => {
@@ -203,22 +191,35 @@ export function VisualAdInjector() {
             data-ad-placement-id={placement.id}
             className="w-full space-y-3"
           >
-            {ads.map((ad) => (
-              <div
-                key={ad.id}
-                className="rounded-2xl bg-[#FAF7F2]/92 border border-[#264653]/12 p-3 sm:p-4 overflow-hidden"
-              >
-                <div className="flex items-center justify-between gap-2 mb-2 px-1">
-                  <span className="text-[11px] font-mono text-[#264653]/55">
-                    Advertisement
-                  </span>
-                  <span className="text-[11px] font-mono text-[#264653]/45 truncate">
-                    {ad.provider}
-                  </span>
+            {ads.map((ad) => {
+              const resolvedAd: AdRecord = {
+                ...ad,
+                width:
+                  ad.width && ad.width !== 'auto'
+                    ? ad.width
+                    : placement.width || 'auto',
+                height:
+                  ad.height && ad.height !== 'auto'
+                    ? ad.height
+                    : placement.height || 'auto',
+              };
+              return (
+                <div
+                  key={ad.id}
+                  className="rounded-2xl bg-[#FAF7F2]/92 border border-[#264653]/12 p-3 sm:p-4 overflow-hidden"
+                >
+                  <div className="flex items-center justify-between gap-2 mb-2 px-1">
+                    <span className="text-[11px] font-mono text-[#264653]/55">
+                      Advertisement
+                    </span>
+                    <span className="text-[11px] font-mono text-[#264653]/45 truncate">
+                      {ad.provider}
+                    </span>
+                  </div>
+                  <SandboxedAdFrame ad={resolvedAd} />
                 </div>
-                <SandboxedAdFrame ad={ad} />
-              </div>
-            ))}
+              );
+            })}
           </aside>,
           host
         )

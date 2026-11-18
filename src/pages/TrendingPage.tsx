@@ -5,6 +5,7 @@ import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
 import { PromptCard } from '../components/PromptCard';
 import { SafeImage } from '../components/SafeImage';
+import { SeoHead, resolveCanonicalOrigin } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 import { TrendingTab } from '../types/prompt';
 
@@ -64,8 +65,24 @@ export function TrendingPage() {
   const topSpot = rankedPrompts[0];
   const restList = rankedPrompts.slice(1);
 
+  const canonicalOrigin = resolveCanonicalOrigin();
+
   return (
     <PageTransition>
+      <SeoHead
+        title="Trending AI Artwork & Popular Prompts — ImageLab"
+        description="Discover trending AI artworks, top creator studies, and the most popular creations across ImageLab."
+        canonicalPath="/trending"
+        imageUrl={topSpot?.imageUrl}
+        structuredData={{
+          '@context': 'https://schema.org',
+          '@type': 'CollectionPage',
+          name: 'Trending AI Artwork — ImageLab',
+          url: `${canonicalOrigin}/trending`,
+          description:
+            'Discover trending AI artworks, top creator studies, and the most popular creations across ImageLab.',
+        }}
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16">
         <div className="mb-5">
           <BackButton fallbackTo="/" label="Back" />

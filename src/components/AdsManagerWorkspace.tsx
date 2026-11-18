@@ -27,9 +27,19 @@ import {
   AdRecord,
   AdStatus,
   AdType,
+  DIMENSION_PRESETS,
   VisualPlacementRecord,
+  formatReadableError,
   getAdTypeLabel,
 } from '../types/ads';
+import {
+  createAdvertisement,
+  deleteAdvertisement,
+  deleteVisualPlacement,
+  fetchAdminWorkspaceData,
+  updateAdvertisement,
+  updateVisualPlacement,
+} from '../lib/adsPersistence';
 import { AdSlot, notifyActiveAdsUpdated } from './AdSlot';
 
 interface AdsManagerWorkspaceProps {
@@ -89,9 +99,21 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   const [placementEditForm, setPlacementEditForm] = useState<{
     name: string;
     position: AdInsertPosition;
+    adType: AdType;
+    width: string;
+    height: string;
     priority: number;
     status: AdStatus;
-  }>({ name: '', position: 'after', priority: 10, status: 'active' });
+  }>({
+    name: '',
+    position: 'after',
+    adType: 'responsive_banner',
+    width: 'auto',
+    height: 'auto',
+    priority: 10,
+    status: 'active',
+  });
+  const [placementEditError, setPlacementEditError] = useState<string | null>(null);
   const [savingPlacementEdit, setSavingPlacementEdit] = useState(false);
 
   // Previews & Delete Confirms
@@ -110,41 +132,8 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     setLoading(true);
     setLoadError(null);
     try {
-      const token = await getIdToken();
-      if (!token) {
-        setLoadError('Sign in again to manage visual placements and advertisements.');
-        setLoading(false);
-        return;
-      }
-
-      const [plcRes, adsRes] = await Promise.all([
-        fetch('/api/admin/placements', {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-        fetch('/api/admin/ads', {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-      ]);
-
-      const plcPayload = (await plcRes.json().catch(() => ({}))) as {
-        placements?: VisualPlacementRecord[];
-        error?: string;
-      };
-      const adsPayload = (await adsRes.json().catch(() => ({}))) as {
-        ads?: AdRecord[];
-        error?: string;
-      };
-
-      if (!plcRes.ok || !adsRes.ok) {
-        setLoadError(
-          plcPayload.error || adsPayload.error || 'Unable to load Ads Manager data.'
-        );
-        setLoading(false);
-        return;
-      }
-
-      const nextPlacements = Array.isArray(plcPayload.placements) ? plcPayload.placements : [];
-      const nextAds = Array.isArray(adsPayload.ads) ? adsPayload.ads : [];
+      const { placements: nextPlacements, ads: nextAds } =
+        await fetchAdminWorkspaceData(getIdToken);
       setPlacements(nextPlacements);
       setAds(nextAds);
 
@@ -159,8 +148,10 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
         active: nextAds.filter((a) => a.status === 'active').length,
         placements: nextPlacements.length,
       });
-    } catch {
-      setLoadError('Network error while loading visual placements and advertisements.');
+    } catch (err) {
+      setLoadError(
+        formatReadableError(err, 'Unable to load visual placements and advertisements.')
+      );
     } finally {
       setLoading(false);
     }
@@ -174,11 +165,15 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   useEffect(() => {
     const preselectedPlacementId = searchParams.get('placementId');
     if (!preselectedPlacementId || placements.length === 0) return;
-    if (placements.some((p) => p.id === preselectedPlacementId)) {
+    const matched = placements.find((p) => p.id === preselectedPlacementId);
+    if (matched) {
       setEditingAdId(null);
       setFormState({
         ...DEFAULT_AD_FORM,
-        placementId: preselectedPlacementId,
+        placementId: matched.id,
+        adType: matched.adType || DEFAULT_AD_FORM.adType,
+        width: matched.width || DEFAULT_AD_FORM.width,
+        height: matched.height || DEFAULT_AD_FORM.height,
       });
       setFormError(null);
       setModalOpen(true);
@@ -218,10 +213,14 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   }, [ads, searchTerm, statusFilter, placementFilter, placementMap]);
 
   const openCreateModal = () => {
+    const first = placements[0];
     setEditingAdId(null);
     setFormState({
       ...DEFAULT_AD_FORM,
-      placementId: placements[0]?.id || '',
+      placementId: first?.id || '',
+      adType: first?.adType || DEFAULT_AD_FORM.adType,
+      width: first?.width || DEFAULT_AD_FORM.width,
+      height: first?.height || DEFAULT_AD_FORM.height,
     });
     setFormError(null);
     setModalOpen(true);
@@ -253,42 +252,18 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     }
     setSaving(true);
     try {
-      const token = await getIdToken();
-      if (!token) {
-        setFormError('Your session expired. Refresh and sign in again.');
-        return;
-      }
-
-      const endpoint = editingAdId
-        ? `/api/admin/ads/${editingAdId}`
-        : '/api/admin/ads';
-      const method = editingAdId ? 'PATCH' : 'POST';
-
-      const res = await fetch(endpoint, {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(formState),
-      });
-
-      const payload = (await res.json().catch(() => ({}))) as {
-        ad?: AdRecord;
-        error?: string;
-      };
-
-      if (!res.ok) {
-        setFormError(payload.error || 'Could not save advertisement.');
-        return;
+      if (editingAdId) {
+        await updateAdvertisement(editingAdId, formState, getIdToken);
+      } else {
+        await createAdvertisement(formState, getIdToken);
       }
 
       setModalOpen(false);
       showToast(editingAdId ? 'Advertisement updated' : 'Advertisement created', 'teal');
       notifyActiveAdsUpdated();
       await loadWorkspaceData();
-    } catch {
-      setFormError('Network error while saving advertisement.');
+    } catch (err) {
+      setFormError(formatReadableError(err, 'Could not save advertisement.'));
     } finally {
       setSaving(false);
     }
@@ -297,28 +272,18 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   const handleToggleAdStatus = async (ad: AdRecord) => {
     const nextStatus: AdStatus = ad.status === 'active' ? 'disabled' : 'active';
     try {
-      const token = await getIdToken();
-      const res = await fetch(`/api/admin/ads/${ad.id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      if (!res.ok) {
-        const payload = await res.json().catch(() => ({}));
-        showToast(payload.error || 'Unable to toggle advertisement status', 'terracotta');
-        return;
-      }
+      await updateAdvertisement(ad.id, { status: nextStatus }, getIdToken);
       showToast(
         nextStatus === 'active' ? 'Advertisement enabled' : 'Advertisement disabled',
         nextStatus === 'active' ? 'teal' : 'deep'
       );
       notifyActiveAdsUpdated();
       await loadWorkspaceData();
-    } catch {
-      showToast('Network error updating advertisement status', 'terracotta');
+    } catch (err) {
+      showToast(
+        formatReadableError(err, 'Unable to toggle advertisement status.'),
+        'terracotta'
+      );
     }
   };
 
@@ -327,28 +292,22 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     if (!draft) return;
     setSavingRowId(ad.id);
     try {
-      const token = await getIdToken();
-      const res = await fetch(`/api/admin/ads/${ad.id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
+      await updateAdvertisement(
+        ad.id,
+        {
           placementId: draft.placementId,
           priority: draft.priority,
-        }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        showToast(payload.error || 'Unable to save placement assignment', 'terracotta');
-        return;
-      }
+        },
+        getIdToken
+      );
       showToast('Placement & priority updated', 'teal');
       notifyActiveAdsUpdated();
       await loadWorkspaceData();
-    } catch {
-      showToast('Network error saving changes', 'terracotta');
+    } catch (err) {
+      showToast(
+        formatReadableError(err, 'Unable to save placement assignment.'),
+        'terracotta'
+      );
     } finally {
       setSavingRowId(null);
     }
@@ -358,21 +317,13 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      const token = await getIdToken();
-      const res = await fetch(`/api/admin/ads/${deleteTarget.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        showToast('Unable to delete advertisement', 'terracotta');
-        return;
-      }
+      await deleteAdvertisement(deleteTarget.id, getIdToken);
       setDeleteTarget(null);
       showToast('Advertisement deleted', 'deep');
       notifyActiveAdsUpdated();
       await loadWorkspaceData();
-    } catch {
-      showToast('Network error deleting advertisement', 'terracotta');
+    } catch (err) {
+      showToast(formatReadableError(err, 'Unable to delete advertisement.'), 'terracotta');
     } finally {
       setDeleting(false);
     }
@@ -381,9 +332,13 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   // Visual Placement Actions
   const openEditPlacement = (plc: VisualPlacementRecord) => {
     setEditingPlacement(plc);
+    setPlacementEditError(null);
     setPlacementEditForm({
       name: plc.name,
       position: plc.position,
+      adType: plc.adType || 'responsive_banner',
+      width: plc.width || 'auto',
+      height: plc.height || 'auto',
       priority: plc.priority,
       status: plc.status,
     });
@@ -392,28 +347,18 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   const handleSavePlacementEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingPlacement) return;
+    setPlacementEditError(null);
     setSavingPlacementEdit(true);
     try {
-      const token = await getIdToken();
-      const res = await fetch(`/api/admin/placements/${editingPlacement.id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(placementEditForm),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        showToast(payload.error || 'Could not update placement', 'terracotta');
-        return;
-      }
+      await updateVisualPlacement(editingPlacement.id, placementEditForm, getIdToken);
       setEditingPlacement(null);
       showToast('Placement updated', 'teal');
       notifyActiveAdsUpdated();
       await loadWorkspaceData();
-    } catch {
-      showToast('Network error updating placement', 'terracotta');
+    } catch (err) {
+      const message = formatReadableError(err, 'Could not update visual placement.');
+      setPlacementEditError(message);
+      showToast(message, 'terracotta');
     } finally {
       setSavingPlacementEdit(false);
     }
@@ -422,27 +367,18 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   const handleTogglePlacementStatus = async (plc: VisualPlacementRecord) => {
     const nextStatus: AdStatus = plc.status === 'active' ? 'disabled' : 'active';
     try {
-      const token = await getIdToken();
-      const res = await fetch(`/api/admin/placements/${plc.id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ status: nextStatus }),
-      });
-      if (!res.ok) {
-        showToast('Unable to update placement status', 'terracotta');
-        return;
-      }
+      await updateVisualPlacement(plc.id, { status: nextStatus }, getIdToken);
       showToast(
         nextStatus === 'active' ? 'Placement enabled' : 'Placement disabled',
         nextStatus === 'active' ? 'teal' : 'deep'
       );
       notifyActiveAdsUpdated();
       await loadWorkspaceData();
-    } catch {
-      showToast('Network error updating placement', 'terracotta');
+    } catch (err) {
+      showToast(
+        formatReadableError(err, 'Unable to update placement status.'),
+        'terracotta'
+      );
     }
   };
 
@@ -450,21 +386,13 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     if (!deletePlacementTarget) return;
     setDeleting(true);
     try {
-      const token = await getIdToken();
-      const res = await fetch(`/api/admin/placements/${deletePlacementTarget.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        showToast('Unable to delete placement', 'terracotta');
-        return;
-      }
+      await deleteVisualPlacement(deletePlacementTarget.id, getIdToken);
       setDeletePlacementTarget(null);
       showToast('Visual placement deleted', 'deep');
       notifyActiveAdsUpdated();
       await loadWorkspaceData();
-    } catch {
-      showToast('Network error deleting placement', 'terracotta');
+    } catch (err) {
+      showToast(formatReadableError(err, 'Unable to delete placement.'), 'terracotta');
     } finally {
       setDeleting(false);
     }
@@ -612,8 +540,12 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
 
                     <p className="text-xs text-[#264653]/70 truncate">
                       Route: <span className="font-mono font-semibold">{plc.pageRoute}</span> ·
-                      Position: <strong className="uppercase">{plc.position}</strong> · Area:{' '}
-                      <span>{plc.elementInfo}</span>
+                      Position: <strong className="uppercase">{plc.position}</strong> · Format:{' '}
+                      <span>{getAdTypeLabel(plc.adType || 'responsive_banner')}</span> (
+                      <span className="font-mono">
+                        {plc.width || 'auto'} × {plc.height || 'auto'}
+                      </span>
+                      ) · Area: <span>{plc.elementInfo}</span>
                     </p>
 
                     {plc.anchorMissing && (
@@ -648,6 +580,9 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                         setFormState({
                           ...DEFAULT_AD_FORM,
                           placementId: plc.id,
+                          adType: plc.adType || DEFAULT_AD_FORM.adType,
+                          width: plc.width || DEFAULT_AD_FORM.width,
+                          height: plc.height || DEFAULT_AD_FORM.height,
                         });
                         setFormError(null);
                         setModalOpen(true);
@@ -1208,15 +1143,28 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                   <select
                     required
                     value={formState.placementId}
-                    onChange={(e) =>
-                      setFormState((p) => ({ ...p, placementId: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      const matched = placementMap.get(nextId);
+                      setFormState((p) => {
+                        if (!editingAdId && matched) {
+                          return {
+                            ...p,
+                            placementId: nextId,
+                            adType: matched.adType || p.adType,
+                            width: matched.width || p.width,
+                            height: matched.height || p.height,
+                          };
+                        }
+                        return { ...p, placementId: nextId };
+                      });
+                    }}
                     className="w-full h-11 px-3.5 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 text-sm text-[#264653]"
                   >
                     <option value="">Choose a visually selected area...</option>
                     {placements.map((p) => (
                       <option key={p.id} value={p.id}>
-                        {p.name} — {p.pageRoute} ({p.position})
+                        {p.name} — {p.pageRoute} ({p.position} · {p.width || 'auto'}×{p.height || 'auto'})
                       </option>
                     ))}
                   </select>
@@ -1362,6 +1310,16 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
             </div>
 
             <form onSubmit={handleSavePlacementEdit} className="space-y-4">
+              {placementEditError && (
+                <div
+                  role="alert"
+                  className="rounded-xl bg-[#E76F51]/10 border border-[#E76F51]/35 p-3 flex items-start gap-2 text-xs font-medium text-[#264653]"
+                >
+                  <AlertCircle className="w-4 h-4 text-[#D05A3C] shrink-0 mt-0.5" />
+                  <span>{placementEditError}</span>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-bold text-[#264653] mb-1">
                   Placement Name *
@@ -1426,6 +1384,88 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                         priority: Math.max(1, Math.min(999, Number(e.target.value) || 10)),
                       }))
                     }
+                    className="w-full h-11 px-3 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 font-mono text-xs"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-[#264653] mb-1">Ad Type</label>
+                  <select
+                    value={placementEditForm.adType}
+                    onChange={(e) =>
+                      setPlacementEditForm((p) => ({
+                        ...p,
+                        adType: e.target.value as AdType,
+                      }))
+                    }
+                    className="w-full h-11 px-3 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 text-xs font-semibold"
+                  >
+                    {AD_TYPES.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#264653] mb-1">
+                    Dimension Preset
+                  </label>
+                  <select
+                    value={
+                      DIMENSION_PRESETS.find(
+                        (d) =>
+                          d.width === placementEditForm.width &&
+                          d.height === placementEditForm.height
+                      )?.key || 'custom'
+                    }
+                    onChange={(e) => {
+                      const preset = DIMENSION_PRESETS.find((d) => d.key === e.target.value);
+                      if (preset) {
+                        setPlacementEditForm((p) => ({
+                          ...p,
+                          width: preset.width,
+                          height: preset.height,
+                        }));
+                      }
+                    }}
+                    className="w-full h-11 px-3 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 text-xs font-semibold"
+                  >
+                    {DIMENSION_PRESETS.map((d) => (
+                      <option key={d.key} value={d.key}>
+                        {d.label}
+                      </option>
+                    ))}
+                    <option value="custom">Custom Dimensions</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-[#264653] mb-1">Width</label>
+                  <input
+                    type="text"
+                    value={placementEditForm.width}
+                    onChange={(e) =>
+                      setPlacementEditForm((p) => ({ ...p, width: e.target.value }))
+                    }
+                    placeholder="auto or 728px"
+                    className="w-full h-11 px-3 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 font-mono text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-[#264653] mb-1">Height</label>
+                  <input
+                    type="text"
+                    value={placementEditForm.height}
+                    onChange={(e) =>
+                      setPlacementEditForm((p) => ({ ...p, height: e.target.value }))
+                    }
+                    placeholder="auto or 90px"
                     className="w-full h-11 px-3 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 font-mono text-xs"
                   />
                 </div>

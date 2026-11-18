@@ -5,6 +5,7 @@ import { Link } from 'react-router-dom';
 import { PageTransition } from '../components/PageTransition';
 import { PromptCard } from '../components/PromptCard';
 import { SafeImage } from '../components/SafeImage';
+import { SeoHead, resolveCanonicalOrigin } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 
 export function HomePage() {
@@ -29,8 +30,24 @@ export function HomePage() {
 
   const curatedRecent = prompts.slice(0, 6);
 
+  const canonicalOrigin = resolveCanonicalOrigin();
+
   return (
     <PageTransition>
+      <SeoHead
+        title="ImageLab — Discover the Art Behind Every AI Image"
+        description="Explore curated AI artworks, inspect creation details, and discover prompts shared by visual creators on ImageLab."
+        canonicalPath="/"
+        imageUrl={activeHero?.imageUrl}
+        structuredData={{
+          '@context': 'https://schema.org',
+          '@type': 'CollectionPage',
+          name: 'ImageLab Curated AI Artwork Gallery',
+          url: `${canonicalOrigin}/`,
+          description:
+            'Explore curated AI artworks, inspect creation details, and discover prompts shared by visual creators on ImageLab.',
+        }}
+      />
       {/* Hero Section with Animated AI Artwork Backdrop & Spotlight */}
       <section
         data-ad-slot="homepage_hero"

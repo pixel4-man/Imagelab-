@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
 import { SafeImage } from '../components/SafeImage';
+import { SeoHead } from '../components/SeoHead';
 import { useAuth } from '../context/AuthContext';
 import { getDashboardPathForRole } from '../server/rbac';
 
@@ -193,6 +194,12 @@ export function SignUpPage() {
 
   return (
     <PageTransition>
+      <SeoHead
+        title="Sign Up — ImageLab"
+        description="Create a free ImageLab contributor account."
+        canonicalPath="/signup"
+        noindex
+      />
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-14 lg:pb-16 space-y-6">
         <div>
           <BackButton fallbackTo="/" label="Back" />

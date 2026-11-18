@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /admin/*
+Disallow: /super-admin
+Disallow: /dashboard
+Disallow: /profile
+Disallow: /saved
+Disallow: /publish
+Disallow: /login
+Disallow: /signup
+
+Sitemap: https://imagelab.imagemart.workers.dev/sitemap.xml

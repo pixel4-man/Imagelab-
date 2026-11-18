@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { AlertCircle, CheckCircle2, Mail, MessageSquare, Send } from 'lucide-react';
 import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
+import { SeoHead, resolveCanonicalOrigin } from '../components/SeoHead';
 
 interface ContactErrors {
   name?: string;
@@ -36,8 +37,21 @@ export function ContactPage() {
     setSubmitted(true);
   };
 
+  const canonicalOrigin = resolveCanonicalOrigin();
+
   return (
     <PageTransition>
+      <SeoHead
+        title="Contact ImageLab — Curation & Community Inquiries"
+        description="Get in touch with the ImageLab curation team for creator spotlights, attribution questions, or community partnerships."
+        canonicalPath="/contact"
+        structuredData={{
+          '@context': 'https://schema.org',
+          '@type': 'ContactPage',
+          name: 'Contact ImageLab',
+          url: `${canonicalOrigin}/contact`,
+        }}
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16">
         <div className="mb-5">
           <BackButton fallbackTo="/" label="Back" />

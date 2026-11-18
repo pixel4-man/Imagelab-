@@ -21,6 +21,7 @@ import { BackButton } from '../components/BackButton';
 import { EmptyState } from '../components/FeedbackStates';
 import { PageTransition } from '../components/PageTransition';
 import { SafeImage } from '../components/SafeImage';
+import { SeoHead } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import { auth, db } from '../lib/firebase';
@@ -116,6 +117,12 @@ export function DashboardPage() {
 
   return (
     <PageTransition>
+      <SeoHead
+        title="Contributor Dashboard — ImageLab"
+        description="Manage your private ImageLab creator dashboard."
+        canonicalPath="/dashboard"
+        noindex
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16 space-y-8">
         <div>
           <BackButton fallbackTo="/" label="Back" />

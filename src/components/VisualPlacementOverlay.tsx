@@ -16,11 +16,18 @@ import {
   usePlacementSelector,
 } from '../context/PlacementSelectorContext';
 import {
+  AD_TYPES,
   AdInsertPosition,
+  AdStatus,
+  AdType,
+  DIMENSION_PRESETS,
   VisualPlacementRecord,
+  formatReadableError,
+  getAdTypeLabel,
   normalizePageRoute,
   normalizeSlotIdentifier,
 } from '../types/ads';
+import { createVisualPlacement } from '../lib/adsPersistence';
 import { notifyActiveAdsUpdated } from './AdSlot';
 
 interface BoxRect {
@@ -200,11 +207,17 @@ export function VisualPlacementOverlay() {
 
   const [placementName, setPlacementName] = useState('');
   const [insertPosition, setInsertPosition] = useState<AdInsertPosition>('after');
+  const [adType, setAdType] = useState<AdType>('responsive_banner');
+  const [width, setWidth] = useState('auto');
+  const [height, setHeight] = useState('auto');
+  const [status, setStatus] = useState<AdStatus>('active');
+  const [priority, setPriority] = useState(10);
   const [wildcardPromptRoute, setWildcardPromptRoute] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savedPlacement, setSavedPlacement] = useState<VisualPlacementRecord | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
+  const savingRef = useRef(false);
   const lastTapRef = useRef<{ el: HTMLElement; time: number; x: number; y: number } | null>(
     null
   );
@@ -262,6 +275,11 @@ export function VisualPlacementOverlay() {
       setSelectedTarget(nextTarget);
       setPlacementName(suggested);
       setInsertPosition('after');
+      setAdType('responsive_banner');
+      setWidth('auto');
+      setHeight('auto');
+      setStatus('active');
+      setPriority(10);
       setWildcardPromptRoute(location.pathname.startsWith('/prompt/'));
       setSavedPlacement(null);
       setSaveError(null);
@@ -369,53 +387,41 @@ export function VisualPlacementOverlay() {
 
   const handleConfirmPlacement = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedTarget) return;
+    if (!selectedTarget || savingRef.current) return;
+    savingRef.current = true;
     setSaveError(null);
     setSaving(true);
     try {
-      const token = await getIdToken();
-      if (!token) {
-        setSaveError('Authentication expired. Please sign in again.');
-        return;
-      }
-
-      const res = await fetch('/api/admin/placements', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
+      const created = await createVisualPlacement(
+        {
           name: placementName.trim(),
           pageRoute: effectivePageRoute,
           slotId: selectedTarget.slotId,
           selector: selectedTarget.selector,
           elementInfo: selectedTarget.elementInfo,
           position: insertPosition,
-          status: 'active',
-          priority: 10,
-        }),
-      });
+          width: width.trim() || 'auto',
+          height: height.trim() || 'auto',
+          adType,
+          status,
+          priority,
+        },
+        getIdToken
+      );
 
-      const payload = (await res.json().catch(() => ({}))) as {
-        placement?: VisualPlacementRecord;
-        error?: string;
-      };
-
-      if (!res.ok || !payload.placement) {
-        setSaveError(payload.error || 'Could not save visual placement.');
-        return;
-      }
-
-      setSavedPlacement(payload.placement);
+      setSavedPlacement(created);
       notifyActiveAdsUpdated();
-      showToast(`Placement "${payload.placement.name}" saved`, 'teal');
-    } catch {
-      setSaveError('Network error while saving placement.');
+      showToast(`Placement "${created.name}" saved`, 'teal');
+    } catch (err) {
+      setSaveError(formatReadableError(err, 'Could not save visual placement.'));
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
+
+  const selectedDimensionPresetKey =
+    DIMENSION_PRESETS.find((p) => p.width === width && p.height === height)?.key || 'custom';
 
   return (
     <>
@@ -566,7 +572,16 @@ export function VisualPlacementOverlay() {
                   <span className="font-mono">{savedPlacement.pageRoute}</span>
                 </p>
                 <p>
-                  <strong>Position:</strong> {savedPlacement.position.toUpperCase()} target area
+                  <strong>Position:</strong> {savedPlacement.position.toUpperCase()} target area ·{' '}
+                  <strong>Status:</strong>{' '}
+                  {savedPlacement.status === 'active' ? 'Enabled' : 'Disabled'}
+                </p>
+                <p>
+                  <strong>Format:</strong> {getAdTypeLabel(savedPlacement.adType)} ·{' '}
+                  <strong>Size:</strong>{' '}
+                  <span className="font-mono">
+                    {savedPlacement.width} × {savedPlacement.height}
+                  </span>
                 </p>
                 <p className="truncate">
                   <strong>Element:</strong> {savedPlacement.elementInfo}
@@ -600,7 +615,7 @@ export function VisualPlacementOverlay() {
               </div>
             </div>
           ) : (
-            <form onSubmit={handleConfirmPlacement} className="space-y-4">
+            <form onSubmit={handleConfirmPlacement} className="space-y-3.5">
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <p className="text-[11px] font-bold uppercase tracking-wider text-[#E76F51]">
@@ -684,23 +699,124 @@ export function VisualPlacementOverlay() {
                 </div>
               </div>
 
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-xs font-bold text-[#264653] mb-1">
+                    Ad Type
+                  </label>
+                  <select
+                    value={adType}
+                    onChange={(e) => setAdType(e.target.value as AdType)}
+                    className="w-full h-9 px-2.5 rounded-xl bg-white border border-[#264653]/18 text-xs font-semibold text-[#264653] focus:outline-none focus:border-[#2A9D8F]"
+                  >
+                    {AD_TYPES.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-[#264653] mb-1">
+                    Dimension Preset
+                  </label>
+                  <select
+                    value={selectedDimensionPresetKey}
+                    onChange={(e) => {
+                      const preset = DIMENSION_PRESETS.find((p) => p.key === e.target.value);
+                      if (preset) {
+                        setWidth(preset.width);
+                        setHeight(preset.height);
+                      }
+                    }}
+                    className="w-full h-9 px-2.5 rounded-xl bg-white border border-[#264653]/18 text-xs font-semibold text-[#264653] focus:outline-none focus:border-[#2A9D8F]"
+                  >
+                    {DIMENSION_PRESETS.map((p) => (
+                      <option key={p.key} value={p.key}>
+                        {p.label}
+                      </option>
+                    ))}
+                    <option value="custom">Custom Dimensions</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-4 gap-2">
+                <div>
+                  <label className="block text-[11px] font-bold text-[#264653] mb-1">
+                    Width
+                  </label>
+                  <input
+                    type="text"
+                    value={width}
+                    onChange={(e) => setWidth(e.target.value)}
+                    placeholder="auto"
+                    className="w-full h-9 px-2.5 rounded-xl bg-white border border-[#264653]/18 font-mono text-xs text-[#264653] focus:outline-none focus:border-[#2A9D8F]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#264653] mb-1">
+                    Height
+                  </label>
+                  <input
+                    type="text"
+                    value={height}
+                    onChange={(e) => setHeight(e.target.value)}
+                    placeholder="auto"
+                    className="w-full h-9 px-2.5 rounded-xl bg-white border border-[#264653]/18 font-mono text-xs text-[#264653] focus:outline-none focus:border-[#2A9D8F]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#264653] mb-1">
+                    Status
+                  </label>
+                  <select
+                    value={status}
+                    onChange={(e) => setStatus(e.target.value as AdStatus)}
+                    className="w-full h-9 px-2 rounded-xl bg-white border border-[#264653]/18 text-xs font-semibold text-[#264653] focus:outline-none focus:border-[#2A9D8F]"
+                  >
+                    <option value="active">Enabled</option>
+                    <option value="disabled">Disabled</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-[#264653] mb-1">
+                    Priority
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={999}
+                    value={priority}
+                    onChange={(e) =>
+                      setPriority(Math.max(1, Math.min(999, Number(e.target.value) || 10)))
+                    }
+                    className="w-full h-9 px-2.5 rounded-xl bg-white border border-[#264653]/18 font-mono text-xs text-[#264653] focus:outline-none focus:border-[#2A9D8F]"
+                  />
+                </div>
+              </div>
+
               {/* Visual Placeholder Preview */}
               <div className="rounded-xl border border-dashed border-[#2A9D8F]/60 bg-[#2A9D8F]/8 p-3 flex items-center justify-between gap-2 text-xs text-[#264653]">
                 <div className="flex items-center gap-2 min-w-0">
                   <Layers className="w-4 h-4 text-[#2A9D8F] shrink-0" />
                   <span className="font-medium truncate">
-                    Ad Slot Preview ({insertPosition} · {effectivePageRoute})
+                    {getAdTypeLabel(adType)} ({insertPosition} · {effectivePageRoute})
                   </span>
                 </div>
-                <span className="font-mono text-[10px] text-[#264653]/65 shrink-0">
-                  Responsive
+                <span className="font-mono text-[10px] text-[#264653]/75 shrink-0">
+                  {width || 'auto'} × {height || 'auto'}
                 </span>
               </div>
 
               {saveError && (
-                <p role="alert" className="text-xs font-medium text-[#D05A3C]">
+                <div
+                  role="alert"
+                  className="rounded-xl bg-[#E76F51]/12 border border-[#E76F51]/40 px-3 py-2 text-xs font-medium text-[#9A3412]"
+                >
                   {saveError}
-                </p>
+                </div>
               )}
 
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-[#264653]/10">

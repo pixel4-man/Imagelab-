@@ -4,6 +4,7 @@ import { BackButton } from '../components/BackButton';
 import { EmptyState } from '../components/FeedbackStates';
 import { PageTransition } from '../components/PageTransition';
 import { PromptCard } from '../components/PromptCard';
+import { SeoHead } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 
 export function SavedPromptsPage() {
@@ -16,6 +17,12 @@ export function SavedPromptsPage() {
 
   return (
     <PageTransition>
+      <SeoHead
+        title="Saved Prompts — ImageLab"
+        description="Your personal collection of saved AI artworks on ImageLab."
+        canonicalPath="/saved"
+        noindex
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16">
         <div className="mb-5">
           <BackButton fallbackTo="/" label="Back" />

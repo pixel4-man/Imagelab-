@@ -5,6 +5,7 @@ import { BackButton } from '../components/BackButton';
 import { EmptyState } from '../components/FeedbackStates';
 import { PageTransition } from '../components/PageTransition';
 import { PromptCard } from '../components/PromptCard';
+import { SeoHead, resolveCanonicalOrigin } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 
 type SortOption = 'popular' | 'copied' | 'recent' | 'title';
@@ -57,8 +58,23 @@ export function ExplorePage() {
     });
   }, [prompts, query, sortBy]);
 
+  const canonicalOrigin = resolveCanonicalOrigin();
+
   return (
     <PageTransition>
+      <SeoHead
+        title="Explore AI Prompts & Artwork — ImageLab"
+        description="Browse curated AI images and discover creative visual prompt studies by artists across ImageLab."
+        canonicalPath="/explore"
+        structuredData={{
+          '@context': 'https://schema.org',
+          '@type': 'CollectionPage',
+          name: 'Explore AI Artwork & Prompts — ImageLab',
+          url: `${canonicalOrigin}/explore`,
+          description:
+            'Browse curated AI images and discover creative visual prompt studies by artists across ImageLab.',
+        }}
+      />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8 pb-16">
         <div className="mb-5">
           <BackButton fallbackTo="/" label="Back" />

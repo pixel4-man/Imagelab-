@@ -16,6 +16,9 @@ import {
   validateRoleTransition,
 } from './src/server/rbac.ts';
 import {
+  type AdType,
+  BUILT_IN_AD_TYPES,
+  findDuplicatePlacement,
   type VisualPlacementRecord,
   normalizePageRoute,
   validateAdPayload,
@@ -953,6 +956,114 @@ async function startServer() {
     return false;
   };
 
+  const extractSafeServerError = (err: unknown, context: string, fallback: string): string => {
+    const raw = err instanceof Error ? err.message : String(err || '');
+    console.error(`[${context}]`, raw);
+    if (
+      raw &&
+      !raw.includes('PRIVATE KEY') &&
+      !raw.includes('FIREBASE_SERVICE_ACCOUNT') &&
+      raw.length <= 240
+    ) {
+      return `${fallback} (${raw})`;
+    }
+    return fallback;
+  };
+
+  const buildPlacementRecordFromDoc = (
+    id: string,
+    d: Record<string, unknown>
+  ): VisualPlacementRecord => {
+    const rawAdType = String(d.adType || 'responsive_banner') as AdType;
+    return {
+      id,
+      name: String(d.name || ''),
+      pageRoute: normalizePageRoute(String(d.pageRoute || '/')),
+      slotId: String(d.slotId || ''),
+      selector: String(d.selector || ''),
+      elementInfo: String(d.elementInfo || ''),
+      position: (
+        d.position === 'before' || d.position === 'inside' ? d.position : 'after'
+      ) as VisualPlacementRecord['position'],
+      width: typeof d.width === 'string' && d.width.trim() ? d.width.trim() : 'auto',
+      height: typeof d.height === 'string' && d.height.trim() ? d.height.trim() : 'auto',
+      adType: BUILT_IN_AD_TYPES.includes(rawAdType) ? rawAdType : 'responsive_banner',
+      status: (d.status === 'disabled' ? 'disabled' : 'active') as VisualPlacementRecord['status'],
+      priority: typeof d.priority === 'number' && Number.isFinite(d.priority) ? d.priority : 10,
+      anchorMissing: Boolean(d.anchorMissing),
+      createdByUid: String(d.createdByUid || ''),
+      createdAt: serializeTs(d.createdAt),
+      updatedAt: serializeTs(d.updatedAt),
+    };
+  };
+
+  const syncPublicAdSlotAdmin = async (adId: string): Promise<void> => {
+    if (!adminDb || !hasAdminCredentials) return;
+    const publicRef = adminDb.collection('publicAdSlots').doc(adId);
+    const adSnap = await adminDb.collection('ads').doc(adId).get();
+    if (!adSnap.exists) {
+      await publicRef.delete().catch(() => {});
+      return;
+    }
+    const adData = adSnap.data() || {};
+    const placementId = String(adData.placementId || '');
+    const scriptCode = String(adData.scriptCode || '').trim();
+    if (adData.status !== 'active' || scriptCode.length < 5 || !placementId) {
+      await publicRef.delete().catch(() => {});
+      return;
+    }
+    const placementSnap = await adminDb.collection('adPlacements').doc(placementId).get();
+    if (!placementSnap.exists) {
+      await publicRef.delete().catch(() => {});
+      return;
+    }
+    const placement = buildPlacementRecordFromDoc(
+      placementSnap.id,
+      (placementSnap.data() || {}) as Record<string, unknown>
+    );
+    if (placement.status !== 'active') {
+      await publicRef.delete().catch(() => {});
+      return;
+    }
+
+    const rawWidth = typeof adData.width === 'string' && adData.width.trim() ? adData.width.trim() : 'auto';
+    const rawHeight = typeof adData.height === 'string' && adData.height.trim() ? adData.height.trim() : 'auto';
+    const effectiveWidth = rawWidth !== 'auto' ? rawWidth : placement.width || 'auto';
+    const effectiveHeight = rawHeight !== 'auto' ? rawHeight : placement.height || 'auto';
+
+    await publicRef.set({
+      id: adId,
+      adId,
+      placementId: placement.id,
+      placementName: placement.name || placement.id,
+      pageRoute: placement.pageRoute,
+      slotId: placement.slotId,
+      selector: placement.selector,
+      position: placement.position,
+      placementPriority: placement.priority,
+      name: String(adData.name || ''),
+      provider: String(adData.provider || ''),
+      adType: BUILT_IN_AD_TYPES.includes(adData.adType as AdType)
+        ? String(adData.adType)
+        : 'responsive_banner',
+      scriptCode,
+      width: effectiveWidth,
+      height: effectiveHeight,
+      priority: typeof adData.priority === 'number' && Number.isFinite(adData.priority) ? adData.priority : 10,
+      status: 'active',
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+  };
+
+  const syncPublicAdSlotsForPlacementAdmin = async (placementId: string): Promise<void> => {
+    if (!adminDb || !hasAdminCredentials) return;
+    const linkedAdsSnap = await adminDb
+      .collection('ads')
+      .where('placementId', '==', placementId)
+      .get();
+    await Promise.all(linkedAdsSnap.docs.map((d) => syncPublicAdSlotAdmin(d.id)));
+  };
+
   // Public Active Ads Delivery (returns ONLY active visual placements and enabled ads)
   app.get('/api/ads/active', async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -973,42 +1084,31 @@ async function startServer() {
       ]);
 
       const placements: VisualPlacementRecord[] = placementsSnap.docs
-        .map((docSnap) => {
-          const d = docSnap.data();
-          return {
-            id: docSnap.id,
-            name: String(d.name || ''),
-            pageRoute: normalizePageRoute(String(d.pageRoute || '/')),
-            slotId: String(d.slotId || ''),
-            selector: String(d.selector || ''),
-            elementInfo: String(d.elementInfo || ''),
-            position: (d.position === 'before' || d.position === 'inside' ? d.position : 'after') as VisualPlacementRecord['position'],
-            status: (d.status === 'disabled' ? 'disabled' : 'active') as VisualPlacementRecord['status'],
-            priority: typeof d.priority === 'number' ? d.priority : 10,
-            anchorMissing: Boolean(d.anchorMissing),
-            createdByUid: String(d.createdByUid || ''),
-            createdAt: serializeTs(d.createdAt),
-            updatedAt: serializeTs(d.updatedAt),
-          };
-        })
+        .map((docSnap) =>
+          buildPlacementRecordFromDoc(docSnap.id, (docSnap.data() || {}) as Record<string, unknown>)
+        )
         .filter((p) => p.status === 'active' && (!routeFilter || matchesRoutePattern(p.pageRoute, routeFilter)))
         .sort((a, b) => (a.priority !== b.priority ? a.priority - b.priority : b.updatedAt.localeCompare(a.updatedAt)));
 
-      const activePlacementIds = new Set(placements.map((p) => p.id));
+      const activePlacementMap = new Map(placements.map((p) => [p.id, p]));
 
       const ads = adsSnap.docs
         .map((docSnap) => {
           const d = docSnap.data();
+          const placementId = String(d.placementId || '');
+          const matchedPlacement = activePlacementMap.get(placementId);
+          const rawWidth = String(d.width || 'auto');
+          const rawHeight = String(d.height || 'auto');
           return {
             id: docSnap.id,
             name: String(d.name || ''),
             provider: String(d.provider || ''),
-            adType: String(d.adType || 'banner'),
+            adType: String(d.adType || matchedPlacement?.adType || 'banner'),
             scriptCode: String(d.scriptCode || ''),
-            placementId: String(d.placementId || ''),
-            placementName: String(d.placementName || ''),
-            width: String(d.width || 'auto'),
-            height: String(d.height || 'auto'),
+            placementId,
+            placementName: matchedPlacement?.name || String(d.placementName || ''),
+            width: rawWidth !== 'auto' ? rawWidth : matchedPlacement?.width || 'auto',
+            height: rawHeight !== 'auto' ? rawHeight : matchedPlacement?.height || 'auto',
             status: String(d.status || 'disabled'),
             priority: typeof d.priority === 'number' ? d.priority : 10,
             createdAt: serializeTs(d.createdAt),
@@ -1020,13 +1120,15 @@ async function startServer() {
             ad.status === 'active' &&
             ad.scriptCode.length >= 5 &&
             ad.placementId &&
-            activePlacementIds.has(ad.placementId)
+            activePlacementMap.has(ad.placementId)
         )
         .sort((a, b) => (a.priority !== b.priority ? a.priority - b.priority : b.updatedAt.localeCompare(a.updatedAt)));
 
       res.json({ placements, ads });
-    } catch {
-      res.status(500).json({ error: 'Unable to load active advertisements.' });
+    } catch (err) {
+      res.status(500).json({
+        error: extractSafeServerError(err, 'GET /api/ads/active', 'Unable to load active advertisements.'),
+      });
     }
   });
 
@@ -1036,32 +1138,20 @@ async function startServer() {
     requireAuthToken,
     adminGuard,
     async (_req: AuthenticatedRequest, res: Response) => {
+      res.setHeader('Cache-Control', 'no-store');
       try {
         const snap = await adminDb!.collection('adPlacements').get();
         const placements: VisualPlacementRecord[] = snap.docs
-          .map((docSnap) => {
-            const d = docSnap.data();
-            return {
-              id: docSnap.id,
-              name: String(d.name || ''),
-              pageRoute: normalizePageRoute(String(d.pageRoute || '/')),
-              slotId: String(d.slotId || ''),
-              selector: String(d.selector || ''),
-              elementInfo: String(d.elementInfo || ''),
-              position: (d.position === 'before' || d.position === 'inside' ? d.position : 'after') as VisualPlacementRecord['position'],
-              status: (d.status === 'disabled' ? 'disabled' : 'active') as VisualPlacementRecord['status'],
-              priority: typeof d.priority === 'number' ? d.priority : 10,
-              anchorMissing: Boolean(d.anchorMissing),
-              createdByUid: String(d.createdByUid || ''),
-              createdAt: serializeTs(d.createdAt),
-              updatedAt: serializeTs(d.updatedAt),
-            };
-          })
+          .map((docSnap) =>
+            buildPlacementRecordFromDoc(docSnap.id, (docSnap.data() || {}) as Record<string, unknown>)
+          )
           .sort((a, b) => (a.priority !== b.priority ? a.priority - b.priority : b.updatedAt.localeCompare(a.updatedAt)));
 
         res.json({ placements });
-      } catch {
-        res.status(500).json({ error: 'Failed to load visual ad placements.' });
+      } catch (err) {
+        res.status(500).json({
+          error: extractSafeServerError(err, 'GET /api/admin/placements', 'Failed to load visual ad placements.'),
+        });
       }
     }
   );
@@ -1078,8 +1168,21 @@ async function startServer() {
         return;
       }
 
-      const placementId = `plc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       try {
+        const existingSnap = await adminDb!.collection('adPlacements').get();
+        const existingList = existingSnap.docs.map((docSnap) =>
+          buildPlacementRecordFromDoc(docSnap.id, (docSnap.data() || {}) as Record<string, unknown>)
+        );
+        const duplicate = findDuplicatePlacement(check.sanitized, existingList);
+        if (duplicate) {
+          res.status(409).json({
+            error: `A placement named "${duplicate.name}" already exists for this area (${duplicate.pageRoute}, ${duplicate.position}). Edit the existing placement instead.`,
+            existingPlacementId: duplicate.id,
+          });
+          return;
+        }
+
+        const placementId = `plc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         const record = {
           id: placementId,
           ...check.sanitized,
@@ -1090,24 +1193,25 @@ async function startServer() {
         };
         await adminDb!.collection('adPlacements').doc(placementId).set(record);
         const saved = await adminDb!.collection('adPlacements').doc(placementId).get();
-        const d = saved.data() || {};
+        if (!saved.exists) {
+          res.status(500).json({ error: 'Placement write could not be verified in Firestore.' });
+          return;
+        }
         res.status(201).json({
-          placement: {
-            ...check.sanitized,
-            id: placementId,
-            anchorMissing: false,
-            createdByUid: req.authUser!.uid,
-            createdAt: serializeTs(d.createdAt),
-            updatedAt: serializeTs(d.updatedAt),
-          },
+          placement: buildPlacementRecordFromDoc(
+            saved.id,
+            (saved.data() || {}) as Record<string, unknown>
+          ),
         });
-      } catch {
-        res.status(500).json({ error: 'Unable to save visual ad placement.' });
+      } catch (err) {
+        res.status(500).json({
+          error: extractSafeServerError(err, 'POST /api/admin/placements', 'Unable to save visual ad placement.'),
+        });
       }
     }
   );
 
-  // Admin: Update visual ad placement (rename, toggle status, priority, position, anchorMissing)
+  // Admin: Update visual ad placement (rename, toggle status, dimensions, adType, priority, position, anchorMissing)
   app.patch(
     '/api/admin/placements/:placementId',
     requireAuthToken,
@@ -1134,6 +1238,9 @@ async function startServer() {
           selector: req.body?.selector ?? existingData.selector,
           elementInfo: req.body?.elementInfo ?? existingData.elementInfo,
           position: req.body?.position ?? existingData.position,
+          width: req.body?.width ?? existingData.width ?? 'auto',
+          height: req.body?.height ?? existingData.height ?? 'auto',
+          adType: req.body?.adType ?? existingData.adType ?? 'responsive_banner',
           status: req.body?.status ?? existingData.status,
           priority: req.body?.priority ?? existingData.priority,
         };
@@ -1141,6 +1248,19 @@ async function startServer() {
         const check = validatePlacementPayload(merged);
         if (!check.valid || !check.sanitized) {
           res.status(400).json({ error: check.error || 'Invalid placement update.' });
+          return;
+        }
+
+        const existingSnap = await adminDb!.collection('adPlacements').get();
+        const existingList = existingSnap.docs.map((docSnap) =>
+          buildPlacementRecordFromDoc(docSnap.id, (docSnap.data() || {}) as Record<string, unknown>)
+        );
+        const duplicate = findDuplicatePlacement(check.sanitized, existingList, placementId);
+        if (duplicate) {
+          res.status(409).json({
+            error: `Another placement ("${duplicate.name}") already targets this exact route and position.`,
+            existingPlacementId: duplicate.id,
+          });
           return;
         }
 
@@ -1168,20 +1288,23 @@ async function startServer() {
           );
         }
 
+        await syncPublicAdSlotsForPlacementAdmin(placementId).catch(() => {});
+
         const updatedSnap = await ref.get();
-        const ud = updatedSnap.data() || {};
         res.json({
-          placement: {
-            ...check.sanitized,
-            id: placementId,
-            anchorMissing: nextAnchorMissing,
-            createdByUid: String(existingData.createdByUid || ''),
-            createdAt: serializeTs(ud.createdAt),
-            updatedAt: serializeTs(ud.updatedAt),
-          },
+          placement: buildPlacementRecordFromDoc(
+            placementId,
+            (updatedSnap.data() || {}) as Record<string, unknown>
+          ),
         });
-      } catch {
-        res.status(500).json({ error: 'Unable to update visual ad placement.' });
+      } catch (err) {
+        res.status(500).json({
+          error: extractSafeServerError(
+            err,
+            'PATCH /api/admin/placements/:placementId',
+            'Unable to update visual ad placement.'
+          ),
+        });
       }
     }
   );
@@ -1199,10 +1322,21 @@ async function startServer() {
       }
 
       try {
+        const publicSlotsSnap = await adminDb!
+          .collection('publicAdSlots')
+          .where('placementId', '==', placementId)
+          .get();
+        await Promise.all(publicSlotsSnap.docs.map((d) => d.ref.delete().catch(() => {})));
         await adminDb!.collection('adPlacements').doc(placementId).delete();
         res.json({ deleted: true, id: placementId });
-      } catch {
-        res.status(500).json({ error: 'Unable to delete visual ad placement.' });
+      } catch (err) {
+        res.status(500).json({
+          error: extractSafeServerError(
+            err,
+            'DELETE /api/admin/placements/:placementId',
+            'Unable to delete visual ad placement.'
+          ),
+        });
       }
     }
   );
@@ -1213,6 +1347,7 @@ async function startServer() {
     requireAuthToken,
     adminGuard,
     async (_req: AuthenticatedRequest, res: Response) => {
+      res.setHeader('Cache-Control', 'no-store');
       try {
         const [adsSnap, placementsSnap] = await Promise.all([
           adminDb!.collection('ads').get(),
@@ -1251,8 +1386,10 @@ async function startServer() {
           .sort((a, b) => (a.priority !== b.priority ? a.priority - b.priority : b.updatedAt.localeCompare(a.updatedAt)));
 
         res.json({ ads });
-      } catch {
-        res.status(500).json({ error: 'Failed to load advertisements.' });
+      } catch (err) {
+        res.status(500).json({
+          error: extractSafeServerError(err, 'GET /api/admin/ads', 'Failed to load advertisements.'),
+        });
       }
     }
   );
@@ -1292,6 +1429,8 @@ async function startServer() {
           updatedByUid: req.authUser!.uid,
         };
         await adminDb!.collection('ads').doc(adId).set(record);
+        await syncPublicAdSlotAdmin(adId).catch(() => {});
+
         const saved = await adminDb!.collection('ads').doc(adId).get();
         const d = saved.data() || {};
         res.status(201).json({
@@ -1304,8 +1443,10 @@ async function startServer() {
             updatedByUid: req.authUser!.uid,
           },
         });
-      } catch {
-        res.status(500).json({ error: 'Unable to create advertisement.' });
+      } catch (err) {
+        res.status(500).json({
+          error: extractSafeServerError(err, 'POST /api/admin/ads', 'Unable to create advertisement.'),
+        });
       }
     }
   );
@@ -1364,6 +1505,7 @@ async function startServer() {
           updatedAt: FieldValue.serverTimestamp(),
           updatedByUid: req.authUser!.uid,
         });
+        await syncPublicAdSlotAdmin(adId).catch(() => {});
 
         const updatedSnap = await ref.get();
         const ud = updatedSnap.data() || {};
@@ -1377,8 +1519,10 @@ async function startServer() {
             updatedByUid: req.authUser!.uid,
           },
         });
-      } catch {
-        res.status(500).json({ error: 'Unable to update advertisement.' });
+      } catch (err) {
+        res.status(500).json({
+          error: extractSafeServerError(err, 'PATCH /api/admin/ads/:adId', 'Unable to update advertisement.'),
+        });
       }
     }
   );
@@ -1396,10 +1540,13 @@ async function startServer() {
       }
 
       try {
+        await adminDb!.collection('publicAdSlots').doc(adId).delete().catch(() => {});
         await adminDb!.collection('ads').doc(adId).delete();
         res.json({ deleted: true, id: adId });
-      } catch {
-        res.status(500).json({ error: 'Unable to delete advertisement.' });
+      } catch (err) {
+        res.status(500).json({
+          error: extractSafeServerError(err, 'DELETE /api/admin/ads/:adId', 'Unable to delete advertisement.'),
+        });
       }
     }
   );
@@ -1453,20 +1600,38 @@ async function startServer() {
     trendingCollections: seededCollectionsMap.get(id) || ['recent', 'today'],
   });
 
-  // Dynamic XML Sitemap (strictly includes ONLY published/approved prompts; unpublished & deleted excluded)
-  app.get('/sitemap.xml', async (req: Request, res: Response) => {
+  const resolveCanonicalSiteOrigin = () => {
+    const candidates = [
+      process.env.PUBLIC_SITE_URL,
+      process.env.VITE_SITE_URL,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue;
+      const trimmed = candidate.trim().replace(/\/+$/, '');
+      if (
+        trimmed &&
+        trimmed !== 'MY_APP_URL' &&
+        /^https?:\/\/[a-zA-Z0-9.-]+(:\d+)?$/i.test(trimmed)
+      ) {
+        return trimmed;
+      }
+    }
+    return 'https://imagelab.imagemart.workers.dev';
+  };
+
+  // Dynamic XML Sitemap (strictly includes ONLY published/approved prompts; unpublished, private & deleted excluded)
+  app.get('/sitemap.xml', async (_req: Request, res: Response) => {
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store');
-    const origin = `${req.protocol}://${req.get('host') || 'imagelab.app'}`;
-    const staticPaths = [
-      '/',
-      '/explore',
-      '/trending',
-      '/saved',
-      '/about',
-      '/contact',
-      '/privacy',
-      '/terms',
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    const origin = resolveCanonicalSiteOrigin();
+    const staticRoutes = [
+      { path: '/', changefreq: 'daily', priority: '1.0' },
+      { path: '/explore', changefreq: 'daily', priority: '0.9' },
+      { path: '/trending', changefreq: 'daily', priority: '0.9' },
+      { path: '/about', changefreq: 'monthly', priority: '0.6' },
+      { path: '/contact', changefreq: 'monthly', priority: '0.5' },
+      { path: '/privacy', changefreq: 'yearly', priority: '0.3' },
+      { path: '/terms', changefreq: 'yearly', priority: '0.3' },
     ];
 
     let promptEntries: { id: string; lastmod: string }[] = [];
@@ -1476,10 +1641,16 @@ async function startServer() {
           .collection('prompts')
           .where('status', '==', 'approved')
           .get();
-        promptEntries = snap.docs.map((docSnap) => ({
-          id: docSnap.id,
-          lastmod: toDateStr(docSnap.data()?.updatedAt || docSnap.data()?.createdAt),
-        }));
+        promptEntries = snap.docs
+          .filter((docSnap) => /^[a-zA-Z0-9_-]{1,128}$/.test(docSnap.id))
+          .map((docSnap) => ({
+            id: docSnap.id,
+            lastmod: toDateStr(docSnap.data()?.updatedAt || docSnap.data()?.createdAt),
+          }))
+          .sort((a, b) => {
+            const cmp = b.lastmod.localeCompare(a.lastmod);
+            return cmp !== 0 ? cmp : a.id.localeCompare(b.id);
+          });
       } catch {
         promptEntries = [];
       }
@@ -1491,35 +1662,34 @@ async function startServer() {
     }
 
     const xmlEsc = (val: string) =>
-      val.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      val
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
 
     const urlsXml = [
-      ...staticPaths.map(
-        (routePath) =>
-          `  <url>\n    <loc>${xmlEsc(`${origin}${routePath}`)}</loc>\n  </url>`
+      ...staticRoutes.map(
+        (route) =>
+          `  <url>\n    <loc>${xmlEsc(`${origin}${route.path}`)}</loc>\n    <changefreq>${route.changefreq}</changefreq>\n    <priority>${route.priority}</priority>\n  </url>`
       ),
       ...promptEntries.map(
         (entry) =>
-          `  <url>\n    <loc>${xmlEsc(`${origin}/prompt/${encodeURIComponent(entry.id)}`)}</loc>\n    <lastmod>${xmlEsc(entry.lastmod)}</lastmod>\n  </url>`
+          `  <url>\n    <loc>${xmlEsc(`${origin}/prompt/${encodeURIComponent(entry.id)}`)}</loc>\n    <lastmod>${xmlEsc(entry.lastmod)}</lastmod>\n    <changefreq>weekly</changefreq>\n    <priority>0.8</priority>\n  </url>`
       ),
     ].join('\n');
 
     res.send(
-      `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlsXml}\n</urlset>`
+      `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urlsXml}\n</urlset>\n`
     );
   });
 
   // Dynamic robots.txt for backend / monolithic origin
-  app.get('/robots.txt', (req: Request, res: Response) => {
+  app.get('/robots.txt', (_req: Request, res: Response) => {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    const siteBase = (
-      process.env.PUBLIC_SITE_URL ||
-      process.env.VITE_SITE_URL ||
-      `${req.protocol}://${req.get('host') || 'imagelab.pages.dev'}`
-    )
-      .trim()
-      .replace(/\/+$/, '');
+    const siteBase = resolveCanonicalSiteOrigin();
     res.send(
       [
         'User-agent: *',
@@ -1529,6 +1699,8 @@ async function startServer() {
         'Disallow: /super-admin',
         'Disallow: /dashboard',
         'Disallow: /profile',
+        'Disallow: /saved',
+        'Disallow: /publish',
         'Disallow: /login',
         'Disallow: /signup',
         '',

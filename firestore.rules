@@ -228,6 +228,9 @@ service cloud.firestore {
           'selector',
           'elementInfo',
           'position',
+          'width',
+          'height',
+          'adType',
           'status',
           'priority',
           'anchorMissing',
@@ -242,6 +245,9 @@ service cloud.firestore {
         && data.selector is string && data.selector.size() >= 2 && data.selector.size() <= 400
         && data.elementInfo is string && data.elementInfo.size() >= 2 && data.elementInfo.size() <= 200
         && data.position in ['before', 'after', 'inside']
+        && (!('width' in data) || (data.width is string && data.width.size() >= 1 && data.width.size() <= 20))
+        && (!('height' in data) || (data.height is string && data.height.size() >= 1 && data.height.size() <= 20))
+        && (!('adType' in data) || data.adType in ['banner', 'responsive_banner', 'native_ad', 'popunder', 'custom_html_js', 'other'])
         && data.status in ['active', 'disabled']
         && data.priority is int && data.priority >= 1 && data.priority <= 999
         && (!('anchorMissing' in data) || data.anchorMissing is bool)
@@ -300,6 +306,68 @@ service cloud.firestore {
         && data.createdAt is timestamp
         && data.updatedAt is timestamp
         && (!('updatedByUid' in data) || isValidId(data.updatedByUid));
+    }
+
+    // Validation blueprint: PublicAdSlot (active-only published creative bound to active placement)
+    function isValidPublicAdSlot(data, adId) {
+      return data.keys().hasAll([
+          'id',
+          'adId',
+          'placementId',
+          'placementName',
+          'pageRoute',
+          'slotId',
+          'selector',
+          'position',
+          'placementPriority',
+          'name',
+          'provider',
+          'adType',
+          'scriptCode',
+          'width',
+          'height',
+          'priority',
+          'status',
+          'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id',
+          'adId',
+          'placementId',
+          'placementName',
+          'pageRoute',
+          'slotId',
+          'selector',
+          'position',
+          'placementPriority',
+          'name',
+          'provider',
+          'adType',
+          'scriptCode',
+          'width',
+          'height',
+          'priority',
+          'status',
+          'updatedAt'
+        ])
+        && data.id is string && data.id == adId && isValidId(data.id)
+        && data.adId is string && data.adId == adId && isValidId(data.adId)
+        && isValidId(data.placementId)
+        && data.placementName is string && data.placementName.size() >= 2 && data.placementName.size() <= 120
+        && data.pageRoute is string && data.pageRoute.size() >= 1 && data.pageRoute.size() <= 200
+        && data.slotId is string && data.slotId.size() >= 2 && data.slotId.size() <= 120
+        && data.selector is string && data.selector.size() >= 2 && data.selector.size() <= 400
+        && data.position in ['before', 'after', 'inside']
+        && data.placementPriority is int && data.placementPriority >= 1 && data.placementPriority <= 999
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 120
+        && data.provider is string && data.provider.size() >= 2 && data.provider.size() <= 80
+        && data.adType in ['banner', 'responsive_banner', 'native_ad', 'popunder', 'custom_html_js', 'other']
+        && data.scriptCode is string && data.scriptCode.size() >= 5 && data.scriptCode.size() <= 50000
+        && data.width is string && data.width.size() >= 1 && data.width.size() <= 20
+        && data.height is string && data.height.size() >= 1 && data.height.size() <= 20
+        && data.priority is int && data.priority >= 1 && data.priority <= 999
+        && data.status == 'active'
+        && data.updatedAt is timestamp;
     }
 
     // Validation blueprint: SiteSettings
@@ -524,7 +592,7 @@ service cloud.firestore {
       allow delete: if isAdmin() && isValidId(categoryId);
     }
 
-    // 6. Visual Ad Placements (strictly Admin & Super Admin; active delivery via verified server API)
+    // 6. Visual Ad Placements (strictly Admin & Super Admin)
     match /adPlacements/{placementId} {
       allow get, list: if isAdmin();
       allow create: if isAdmin()
@@ -539,11 +607,26 @@ service cloud.firestore {
         && incoming().id == existing().id
         && incoming().createdByUid == existing().createdByUid
         && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name',
+          'pageRoute',
+          'slotId',
+          'selector',
+          'elementInfo',
+          'position',
+          'width',
+          'height',
+          'adType',
+          'status',
+          'priority',
+          'anchorMissing',
+          'updatedAt'
+        ]);
       allow delete: if isAdmin() && isValidId(placementId);
     }
 
-    // 7. Ads Manager (strictly Admin & Super Admin; public active delivery via verified server API)
+    // 7. Ads Manager (strictly Admin & Super Admin; private/disabled scripts never public)
     match /ads/{adId} {
       allow get, list: if isAdmin();
       allow create: if isAdmin()
@@ -556,11 +639,64 @@ service cloud.firestore {
         && isValidAdCampaign(incoming(), adId)
         && incoming().id == existing().id
         && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name',
+          'provider',
+          'adType',
+          'scriptCode',
+          'placementId',
+          'placementName',
+          'placement',
+          'customPlacementKey',
+          'width',
+          'height',
+          'status',
+          'priority',
+          'updatedByUid',
+          'updatedAt'
+        ]);
       allow delete: if isAdmin() && isValidId(adId);
     }
 
-    // 7. Site Settings (Super Admin only)
+    // 7b. Public Active Ad Slots (active-only rendered slots; disabled/private ads excluded)
+    match /publicAdSlots/{adId} {
+      allow get: if isValidId(adId) && existing().status == 'active';
+      allow list: if existing().status == 'active';
+      allow create: if isAdmin()
+        && isValidId(adId)
+        && isValidPublicAdSlot(incoming(), adId)
+        && incoming().status == 'active'
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(adId)
+        && isValidPublicAdSlot(incoming(), adId)
+        && incoming().id == existing().id
+        && incoming().adId == existing().adId
+        && incoming().status == 'active'
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'placementId',
+          'placementName',
+          'pageRoute',
+          'slotId',
+          'selector',
+          'position',
+          'placementPriority',
+          'name',
+          'provider',
+          'adType',
+          'scriptCode',
+          'width',
+          'height',
+          'priority',
+          'status',
+          'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(adId);
+    }
+
+    // 8. Site Settings (Super Admin only)
     match /siteSettings/{settingId} {
       allow get: if isValidId(settingId);
       allow list: if isSuperAdmin();
