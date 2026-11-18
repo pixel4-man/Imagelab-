@@ -21,6 +21,7 @@ import {
   validateAdPayload,
   validatePlacementPayload,
 } from '../src/types/ads.ts';
+import { buildAllowedOrigins, isOriginAllowed } from '../src/server/cors.ts';
 
 test('1. Super Admin bootstrap requires exact verified email adilwss67@gmail.com', () => {
   assert.equal(DEFAULT_SUPER_ADMIN_EMAIL, 'adilwss67@gmail.com');
@@ -267,14 +268,16 @@ test('9. Persistence, ProtectedRoute authReady guard, and profile preservation i
     fs.readFileSync(path.resolve(process.cwd(), 'firebase-applet-config.json'), 'utf-8')
   ) as { projectId?: string };
 
-  assert.equal(appletConfig.projectId, 'imagelab-39853');
+  assert.equal(appletConfig.projectId, 'imagelab-c612a');
   assert.match(firebaseSource, /browserLocalPersistence/);
   assert.match(firebaseSource, /setPersistence\(/);
   assert.match(firebaseSource, /getApps\(\)\.length\s*>\s*0/);
-  assert.match(
-    firebaseSource,
-    /firestoreDatabaseId:\s*appletConfig\.firestoreDatabaseId/
-  );
+  assert.match(firebaseSource, /EXPECTED_FIREBASE_PROJECT_ID = 'imagelab-c612a'/);
+  assert.match(firebaseSource, /apiKey:\s*appletConfig\.apiKey\s*\|\|\s*''/);
+  assert.match(firebaseSource, /authDomain:\s*appletConfig\.authDomain\s*\|\|\s*sanitizedEnvAuthDomain/);
+  assert.match(firebaseSource, /VITE_FIREBASE_FIRESTORE_DATABASE_ID/);
+  assert.match(firebaseSource, /appletConfig\.firestoreDatabaseId/);
+  assert.match(firebaseSource, /getFirestore\(app,\s*targetDatabaseId\)/);
 
   assert.match(authContextSource, /ensureAuthPersistence\(\)/);
   assert.match(authContextSource, /getRedirectResult\(auth\)/);
@@ -730,3 +733,80 @@ test('16. Complete Admin Prompt Control, Unified All Prompts, 3-Card Dashboard, 
   assert.match(rulesSource, /'unpublished'/);
   assert.match(rulesSource, /match \/deletedPrompts\/\{promptId\}/);
 });
+
+test('17. Cloudflare Pages SPA fallback, CORS policy, VITE_API_BASE_URL routing, SEO files, and secret isolation hold', () => {
+  // CORS production allowlist blocks unknown origins and localhost in production
+  const prodOrigins = buildAllowedOrigins({
+    allowedOrigins: 'https://imagelab.pages.dev, https://*.imagelab.pages.dev',
+    siteUrl: 'https://imagelab.example.com/',
+    nodeEnv: 'production',
+  });
+  assert.equal(isOriginAllowed('https://imagelab.pages.dev', prodOrigins).allowed, true);
+  assert.equal(isOriginAllowed('https://abc123.imagelab.pages.dev', prodOrigins).allowed, true);
+  assert.equal(isOriginAllowed('https://imagelab.example.com', prodOrigins).allowed, true);
+  assert.equal(isOriginAllowed('http://localhost:3000', prodOrigins).allowed, false);
+  assert.equal(isOriginAllowed('https://evil.example.org', prodOrigins).allowed, false);
+  assert.equal(isOriginAllowed(undefined, prodOrigins).allowed, true);
+
+  // Wildcard "*" alone must never grant CORS access
+  assert.equal(isOriginAllowed('https://evil.example.org', ['*']).allowed, false);
+
+  // Local dev mode enables localhost origins automatically
+  const devOrigins = buildAllowedOrigins({ nodeEnv: 'development' });
+  assert.equal(isOriginAllowed('http://localhost:3000', devOrigins).allowed, true);
+  assert.equal(isOriginAllowed('http://localhost:5173', devOrigins).allowed, true);
+
+  // Cloudflare Workers SPA uses wrangler.jsonc not_found_handling="single-page-application" without _redirects
+  assert.equal(fs.existsSync(path.resolve(process.cwd(), 'public/_redirects')), false);
+
+  const headers = fs.readFileSync(path.resolve(process.cwd(), 'public/_headers'), 'utf-8');
+  assert.match(headers, /Cross-Origin-Opener-Policy:\s*same-origin-allow-popups/);
+  assert.match(headers, /Referrer-Policy:\s*strict-origin-when-cross-origin/);
+
+  // API base helper uses VITE_API_BASE_URL
+  const apiHelperSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/lib/api.ts'),
+    'utf-8'
+  );
+  assert.match(apiHelperSource, /import\.meta\.env\.VITE_API_BASE_URL/);
+
+  // Ensure zero raw fetch('/api/...') calls bypass apiUrl() across client code
+  const walkSrcFiles = (dir: string): string[] => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    return entries.flatMap((entry) => {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) return walkSrcFiles(fullPath);
+      return /\.(ts|tsx)$/.test(entry.name) ? [fullPath] : [];
+    });
+  };
+  for (const filePath of walkSrcFiles(path.resolve(process.cwd(), 'src'))) {
+    const contents = fs.readFileSync(filePath, 'utf-8');
+    assert.doesNotMatch(
+      contents,
+      /fetch\(['"`]\/api\//,
+      `Raw unprefixed fetch('/api/...') found in ${filePath}`
+    );
+    assert.doesNotMatch(
+      contents,
+      /(import\.meta\.env|process\.env)\.FIREBASE_SERVICE_ACCOUNT_JSON|VITE_FIREBASE_SERVICE_ACCOUNT_JSON/,
+      `Client code must never read or prefix FIREBASE_SERVICE_ACCOUNT_JSON: ${filePath}`
+    );
+  }
+
+  // Server health, robots, CORS, API JSON 404, dist check, and new Firebase project ID migration
+  const serverSource = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
+  assert.match(serverSource, /app\.get\('\/health'/);
+  assert.match(serverSource, /app\.get\('\/robots\.txt'/);
+  assert.match(serverSource, /app\.use\('\/api\/\*'/);
+  assert.match(serverSource, /fs\.existsSync\(indexHtmlPath\)/);
+  assert.match(serverSource, /Access-Control-Allow-Origin/);
+  assert.match(serverSource, /EXPECTED_FIREBASE_PROJECT_ID = 'imagelab-c612a'/);
+  assert.doesNotMatch(serverSource, /imagelab-39853/);
+
+  const envExample = fs.readFileSync(path.resolve(process.cwd(), '.env.example'), 'utf-8');
+  assert.doesNotMatch(envExample, /imagelab-39853/);
+  assert.match(envExample, /imagelab-c612a/);
+
+  assert.equal(fs.existsSync(path.resolve(process.cwd(), 'storage.rules')), true);
+});
+

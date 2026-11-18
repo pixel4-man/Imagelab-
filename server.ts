@@ -23,6 +23,7 @@ import {
 } from './src/types/ads.ts';
 import { SEEDED_PROMPT_SECRETS } from './src/server/seededPromptSecrets.ts';
 import { READY_MADE_PROMPTS } from './src/server/seededPromptsData.ts';
+import { buildAllowedOrigins, isOriginAllowed } from './src/server/cors.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -30,6 +31,7 @@ const __dirname = path.dirname(__filename);
 interface AppletConfig {
   projectId?: string;
   firestoreDatabaseId?: string;
+  storageBucket?: string;
 }
 
 function loadAppletConfig(): AppletConfig {
@@ -44,7 +46,7 @@ function loadAppletConfig(): AppletConfig {
   return {};
 }
 
-const EXPECTED_FIREBASE_PROJECT_ID = 'imagelab-39853';
+const EXPECTED_FIREBASE_PROJECT_ID = 'imagelab-c612a';
 
 interface ParsedServiceAccount extends ServiceAccount {
   project_id?: string;
@@ -82,9 +84,9 @@ function loadGoogleApplicationCredentialsProjectId(): string | null {
 
 const appletConfig = loadAppletConfig();
 const PROJECT_ID =
+  appletConfig.projectId ||
   process.env.FIREBASE_PROJECT_ID ||
   process.env.VITE_FIREBASE_PROJECT_ID ||
-  appletConfig.projectId ||
   EXPECTED_FIREBASE_PROJECT_ID;
 const FIRESTORE_DATABASE_ID =
   appletConfig.firestoreDatabaseId ||
@@ -98,9 +100,10 @@ const SUPER_ADMIN_EMAIL =
   process.env.SUPER_ADMIN_EMAIL?.trim() || DEFAULT_SUPER_ADMIN_EMAIL;
 
 const STORAGE_BUCKET =
+  appletConfig.storageBucket ||
   process.env.FIREBASE_STORAGE_BUCKET ||
   process.env.VITE_FIREBASE_STORAGE_BUCKET ||
-  'imagelab-39853.firebasestorage.app';
+  'imagelab-c612a.firebasestorage.app';
 
 const { account: serviceAccount, parseError: serviceAccountParseError } = parseServiceAccount();
 let adminApp: AdminApp | null = null;
@@ -514,20 +517,69 @@ async function startServer() {
   await syncPromptSecretsToPrompts();
 
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '2mb' }));
 
-  // Health check (safe metadata only, never exposes secrets)
+  const allowedOrigins = buildAllowedOrigins({
+    allowedOrigins: process.env.ALLOWED_ORIGINS || process.env.CORS_ALLOWED_ORIGINS,
+    appUrl: process.env.APP_URL,
+    siteUrl: process.env.PUBLIC_SITE_URL || process.env.VITE_SITE_URL,
+    nodeEnv: process.env.NODE_ENV,
+  });
+
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const originHeader = req.headers.origin;
+    const resolution = isOriginAllowed(originHeader, allowedOrigins);
+
+    if (originHeader && resolution.allowed && resolution.allowOriginHeader) {
+      res.setHeader('Access-Control-Allow-Origin', resolution.allowOriginHeader);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Cache-Control');
+      res.setHeader('Access-Control-Max-Age', '86400');
+    }
+
+    if (req.method === 'OPTIONS') {
+      if (originHeader && !resolution.allowed) {
+        res.status(403).json({ error: 'Origin not allowed by CORS policy.' });
+        return;
+      }
+      res.status(204).end();
+      return;
+    }
+
+    if (originHeader && !resolution.allowed && req.path.startsWith('/api/')) {
+      res.status(403).json({ error: 'Origin not allowed by CORS policy.' });
+      return;
+    }
+
+    next();
+  });
+
+  const buildHealthPayload = () => ({
+    ok: true,
+    status: 'healthy',
+    service: 'imagelab-api',
+    environment: process.env.NODE_ENV || 'development',
+    uptimeSeconds: Math.round(process.uptime()),
+    timestamp: new Date().toISOString(),
+    projectId: PROJECT_ID,
+    expectedProjectId: EXPECTED_FIREBASE_PROJECT_ID,
+    projectMatch: PROJECT_ID === EXPECTED_FIREBASE_PROJECT_ID,
+    firestoreDatabaseId: FIRESTORE_DATABASE_ID,
+    storageBucket: STORAGE_BUCKET,
+    projectConfigured: Boolean(PROJECT_ID),
+    serverAdminConfigured: hasAdminCredentials,
+    corsConfigured: allowedOrigins.length > 0,
+    adminConfigError,
+  });
+
+  // Health check endpoints (safe metadata only, never exposes secrets)
   app.get('/api/health', (_req, res) => {
-    res.json({
-      ok: true,
-      projectId: PROJECT_ID,
-      expectedProjectId: EXPECTED_FIREBASE_PROJECT_ID,
-      projectMatch: PROJECT_ID === EXPECTED_FIREBASE_PROJECT_ID,
-      firestoreDatabaseId: FIRESTORE_DATABASE_ID,
-      projectConfigured: Boolean(PROJECT_ID),
-      serverAdminConfigured: hasAdminCredentials,
-      adminConfigError,
-    });
+    res.json(buildHealthPayload());
+  });
+  app.get('/health', (_req, res) => {
+    res.json(buildHealthPayload());
   });
 
   // Server-side session & Super Admin bootstrap check
@@ -1404,6 +1456,35 @@ async function startServer() {
     );
   });
 
+  // Dynamic robots.txt for backend / monolithic origin
+  app.get('/robots.txt', (req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    const siteBase = (
+      process.env.PUBLIC_SITE_URL ||
+      process.env.VITE_SITE_URL ||
+      `${req.protocol}://${req.get('host') || 'imagelab.pages.dev'}`
+    )
+      .trim()
+      .replace(/\/+$/, '');
+    res.send(
+      [
+        'User-agent: *',
+        'Allow: /',
+        'Disallow: /admin',
+        'Disallow: /admin/*',
+        'Disallow: /super-admin',
+        'Disallow: /dashboard',
+        'Disallow: /profile',
+        'Disallow: /login',
+        'Disallow: /signup',
+        '',
+        `Sitemap: ${siteBase}/sitemap.xml`,
+        '',
+      ].join('\n')
+    );
+  });
+
   // Public Prompt Gallery (includes ONLY status == 'approved' prompts)
   app.get('/api/prompts/public', async (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -2125,7 +2206,12 @@ async function startServer() {
     }
   );
 
-  // Vite dev middleware or production static assets
+  // Ensure unmatched /api/* endpoints always return JSON 404
+  app.use('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
+  // Vite dev middleware or production static assets (when dist/ exists locally)
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -2135,10 +2221,24 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');
-    app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
-    });
+    const indexHtmlPath = path.join(distDir, 'index.html');
+    if (fs.existsSync(indexHtmlPath)) {
+      app.use(express.static(distDir));
+      app.get('*', (_req, res) => {
+        res.sendFile(indexHtmlPath);
+      });
+    } else {
+      app.get('/', (_req, res) => {
+        res.json({
+          service: 'imagelab-api',
+          status: 'healthy',
+          health: '/api/health',
+        });
+      });
+      app.use((_req, res) => {
+        res.status(404).json({ error: 'Route not found on ImageLab API server.' });
+      });
+    }
   }
 
   const PORT = Number(process.env.PORT || 3000);

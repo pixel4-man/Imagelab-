@@ -30,11 +30,29 @@ interface FirebaseClientConfig {
   firestoreDatabaseId?: string;
 }
 
+export const EXPECTED_FIREBASE_PROJECT_ID = 'imagelab-c612a';
+
+const sanitizedEnvAuthDomain =
+  import.meta.env.VITE_FIREBASE_AUTH_DOMAIN &&
+  import.meta.env.VITE_FIREBASE_AUTH_DOMAIN.includes(EXPECTED_FIREBASE_PROJECT_ID)
+    ? import.meta.env.VITE_FIREBASE_AUTH_DOMAIN
+    : '';
+
+const sanitizedEnvProjectId =
+  import.meta.env.VITE_FIREBASE_PROJECT_ID === EXPECTED_FIREBASE_PROJECT_ID
+    ? import.meta.env.VITE_FIREBASE_PROJECT_ID
+    : '';
+
 const resolvedConfig: FirebaseClientConfig = {
-  apiKey: appletConfig.apiKey || import.meta.env.VITE_FIREBASE_API_KEY || '',
-  authDomain: appletConfig.authDomain || import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
-  projectId: appletConfig.projectId || import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
-  storageBucket: appletConfig.storageBucket || import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || '',
+  apiKey: appletConfig.apiKey || '',
+  authDomain: appletConfig.authDomain || sanitizedEnvAuthDomain || '',
+  projectId: appletConfig.projectId || sanitizedEnvProjectId || '',
+  storageBucket:
+    appletConfig.storageBucket ||
+    (import.meta.env.VITE_FIREBASE_STORAGE_BUCKET?.includes(EXPECTED_FIREBASE_PROJECT_ID)
+      ? import.meta.env.VITE_FIREBASE_STORAGE_BUCKET
+      : '') ||
+    '',
   messagingSenderId:
     appletConfig.messagingSenderId || import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '',
   appId: appletConfig.appId || import.meta.env.VITE_FIREBASE_APP_ID || '',
@@ -52,9 +70,12 @@ export const missingFirebaseConfigKeys: string[] = (
   ['apiKey', 'authDomain', 'projectId', 'appId'] as const
 ).filter((key) => !resolvedConfig[key]);
 
-export const isFirebaseConfigured = missingFirebaseConfigKeys.length === 0;
+export const isFirebaseConfigured =
+  missingFirebaseConfigKeys.length === 0 &&
+  resolvedConfig.projectId === EXPECTED_FIREBASE_PROJECT_ID;
 export const activeFirebaseProjectId = resolvedConfig.projectId;
 export const activeFirestoreDatabaseId = resolvedConfig.firestoreDatabaseId || '(default)';
+export const activeStorageBucket = resolvedConfig.storageBucket;
 
 let app: FirebaseApp | null = null;
 let auth: Auth | null = null;
