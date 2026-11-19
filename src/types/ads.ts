@@ -120,7 +120,7 @@ export function validateSafeHttpUrl(raw?: string): {
   if (typeof raw !== 'string') {
     return { valid: false, sanitized: '', error: 'Destination URL must be text.' };
   }
-  const trimmed = raw.trim();
+  const trimmed = raw.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '').trim();
   if (!trimmed) {
     return { valid: true, sanitized: '' };
   }
@@ -294,6 +294,38 @@ export function normalizeCreativeMarkup(scriptCode: string): string {
   return trimmed;
 }
 
+const UNSAFE_TOP_HIJACK_PATTERN =
+  /(?:window\.top\.location\b|\btop\.location\s*=|\bparent\.location\s*=|<meta[^>]+http-equiv\s*=\s*['"]?refresh)/i;
+
+const UNSAFE_AUDIENCE_KEYWORD_PATTERN =
+  /\b(porn|xxx|xvideos|pornhub|onlyfans-leak|camgirl|escort|casino-bonus|betting-promo|crypto-drainer)\b/i;
+
+/**
+ * Screens ad snippets and destination URLs for top-window hijack attempts or
+ * explicit non-family-safe promotional targets before saving to Firestore.
+ */
+export function validateAudienceSafeAd(
+  scriptCode: string,
+  destinationUrl?: string
+): { safe: boolean; reason?: string } {
+  const combined = `${scriptCode || ''}\n${destinationUrl || ''}`;
+  if (UNSAFE_TOP_HIJACK_PATTERN.test(scriptCode || '')) {
+    return {
+      safe: false,
+      reason:
+        'Advertisement script contains a top-frame navigation hijack or meta-refresh redirect, which is disallowed for ImageLab visitors.',
+    };
+  }
+  if (UNSAFE_AUDIENCE_KEYWORD_PATTERN.test(combined)) {
+    return {
+      safe: false,
+      reason:
+        'Advertisement references restricted adult, gambling, or unsafe keywords unsuitable for ImageLab’s audience.',
+    };
+  }
+  return { safe: true };
+}
+
 export function findDuplicatePlacement<
   T extends { id: string; name: string; pageRoute: string; slotId: string; selector: string; position: AdInsertPosition }
 >(
@@ -443,6 +475,11 @@ export function validateAdPayload(
   const destCheck = validateSafeHttpUrl(input.destinationUrl);
   if (!destCheck.valid) {
     return { valid: false, error: destCheck.error || 'Invalid Destination URL.' };
+  }
+
+  const safetyCheck = validateAudienceSafeAd(scriptCode, destCheck.sanitized);
+  if (!safetyCheck.safe) {
+    return { valid: false, error: safetyCheck.reason || 'Advertisement rejected by audience safety policy.' };
   }
 
   if (!/^[a-zA-Z0-9_-]{2,128}$/.test(placementId)) {

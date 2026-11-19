@@ -261,7 +261,12 @@ export function LivePublicAdItem({
     return () => onVisibilityChange?.(ad.id, false);
   }, [ad.id, onVisibilityChange]);
 
-  if (status === 'no_inventory' || status === 'script_blocked' || status === 'error') {
+  if (
+    status === 'no_inventory' ||
+    status === 'rendering_blocked' ||
+    status === 'script_blocked' ||
+    status === 'error'
+  ) {
     return null;
   }
 
@@ -309,6 +314,11 @@ function getPreviewStatusBadge(status: AdRenderStatus): {
         label: 'Script Loaded',
         className: 'bg-[#264653]/10 text-[#264653]',
       };
+    case 'iframe_created':
+      return {
+        label: 'Iframe Created',
+        className: 'bg-[#264653]/12 text-[#264653]',
+      };
     case 'preview_unsupported':
       return {
         label: 'Preview Unsupported',
@@ -321,8 +331,13 @@ function getPreviewStatusBadge(status: AdRenderStatus): {
       };
     case 'no_inventory':
       return {
-        label: 'Ad Unavailable',
+        label: 'No Inventory',
         className: 'bg-[#E9C46A]/35 text-[#7A530B]',
+      };
+    case 'rendering_blocked':
+      return {
+        label: 'Rendering Blocked',
+        className: 'bg-[#E76F51]/15 text-[#9A3412]',
       };
     case 'script_blocked':
       return {
@@ -387,7 +402,8 @@ export function AdSlot({
   const hasDest = Boolean(validateSafeHttpUrl(adOverride.destinationUrl).sanitized);
   const ownsClickables = hasOwnInteractiveOrScriptElements(adOverride.scriptCode);
 
-  const isPendingState = status === 'loading' || status === 'script_loaded';
+  const isPendingState =
+    status === 'loading' || status === 'script_loaded' || status === 'iframe_created';
   const isRendered = status === 'loaded';
   const badge = getPreviewStatusBadge(status);
 
@@ -474,13 +490,19 @@ export function AdSlot({
             <Loader2 className="w-4 h-4 text-[#2A9D8F] animate-spin shrink-0 mt-0.5" />
             <div className="space-y-0.5">
               <p className="font-bold">
-                {status === 'script_loaded' ? 'Script Loaded' : 'Loading Sandbox Preview'}
+                {status === 'iframe_created'
+                  ? 'Iframe Created'
+                  : status === 'script_loaded'
+                    ? 'Script Loaded'
+                    : 'Loading Sandbox Preview'}
               </p>
               <p className="text-[#264653]/75">
                 {statusMessage ||
-                  (status === 'script_loaded'
-                    ? 'External ad script loaded; verifying visible creative output...'
-                    : 'Executing submitted snippet inside isolated sandbox without parent DOM, cookies, or auth access...')}
+                  (status === 'iframe_created'
+                    ? 'Nested iframe mounted; waiting for creative content inside the frame (never counts an empty frame as rendered)...'
+                    : status === 'script_loaded'
+                      ? 'External ad script loaded; verifying visible creative output...'
+                      : 'Executing submitted snippet inside isolated sandbox without parent DOM, cookies, or auth access...')}
               </p>
             </div>
           </div>
@@ -493,7 +515,7 @@ export function AdSlot({
           >
             <CheckCircle2 className="w-4 h-4 text-[#2A9D8F] shrink-0 mt-0.5" />
             <div className="space-y-0.5">
-              <p className="font-bold text-[#218175]">Ad Rendered</p>
+              <p className="font-bold text-[#218175]">Creative Rendered · Ad Rendered</p>
               <p className="text-[#264653]/80">
                 {statusMessage || 'Visible creative output verified inside sandboxed container.'}
                 {hasDest && !ownsClickables
@@ -513,10 +535,26 @@ export function AdSlot({
           >
             <Info className="w-4 h-4 text-[#9A6B13] shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <p className="font-bold text-[#7A530B]">Ad Unavailable</p>
+              <p className="font-bold text-[#7A530B]">Ad Unavailable · No Inventory</p>
               <p className="text-[#264653]/85 leading-relaxed">
                 {statusMessage ||
                   'The advertisement script loaded and ran without errors, but returned no ad inventory or visible creative.'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status === 'rendering_blocked' && (
+          <div
+            role="alert"
+            className="rounded-xl bg-[#E76F51]/12 border border-[#E76F51]/40 px-3.5 py-3 flex items-start gap-2.5 text-xs text-[#264653]"
+          >
+            <ShieldAlert className="w-4 h-4 text-[#D05A3C] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold text-[#9A3412]">Rendering Blocked</p>
+              <p className="text-[#264653]/85 leading-relaxed">
+                {statusMessage ||
+                  'Creative rendering inside the isolated sandbox failed (empty about:blank frame or cross-origin policy restriction prevented fill).'}
               </p>
             </div>
           </div>

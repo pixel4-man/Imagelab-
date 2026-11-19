@@ -1211,12 +1211,12 @@ test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects
   assert.match(modalSlice, /Preview Advertisement/);
   assert.match(modalSlice, /Selected Website Placement/);
 
-  // 6. Public empty-ad collapsing on real errors/no-fill while allowing cross-origin provider frames to render live at configured dimensions
+  // 6. Public empty-ad collapsing on real errors/no-fill/rendering_blocked while allowing verified/external-URL frames to render live at configured dimensions
   const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
   assert.match(adSlotSource, /LivePublicAdItem/);
   assert.match(
     adSlotSource,
-    /status === 'no_inventory' \|\| status === 'script_blocked' \|\| status === 'error'/
+    /status === 'no_inventory' \|\|\s*status === 'rendering_blocked' \|\|\s*status === 'script_blocked' \|\|\s*status === 'error'/
   );
   assert.match(
     adSlotSource,
@@ -1310,7 +1310,7 @@ test('21. Two-column 9:16 Instagram-style gallery, image-only tiles, authenticat
   assert.match(rulesSource, /!\('promptText' in incoming\(\)\)/);
 });
 
-test('22. Adsterra official code parsing, sandbox compatibility, zero-false-positive visibility probe, and 6-state diagnostics hold', () => {
+test('22. Adsterra official code parsing, friendly about:blank isolation bridge, audience safety filtering, zero-false-positive visibility probe, and full diagnostics hold', () => {
   // 1. Official Adsterra atOptions metadata extraction
   const officialAdsterraSnippet = `
     <script type="text/javascript">
@@ -1346,7 +1346,7 @@ test('22. Adsterra official code parsing, sandbox compatibility, zero-false-posi
     'atOptions configuration must execute before external invoke.js'
   );
 
-  // 3. Sandboxed srcDoc includes storage/cookie isolation shims, safe document.write wrapper, and strict zero-false-positive detection
+  // 3. Sandboxed srcDoc includes storage/cookie isolation shims, friendly about:blank srcdoc bridge, CORS monitoring, and zero-false-positive detection
   const srcDoc = buildSandboxedAdSrcDoc(
     {
       id: 'ad_adsterra_probe_1',
@@ -1368,28 +1368,62 @@ test('22. Adsterra official code parsing, sandbox compatibility, zero-false-posi
   assert.match(srcDoc, /min-width:\s*300px/);
   assert.match(srcDoc, /min-height:\s*250px/);
   assert.match(srcDoc, /createMemoryStorage/);
+  assert.match(srcDoc, /installFriendlyBlankIframeBridge/);
   assert.match(srcDoc, /appendMarkupSafelyAfterLoad/);
   assert.match(srcDoc, /securitypolicyviolation/);
-  // Must NEVER treat an empty nested <iframe> tag alone as 'loaded'
-  assert.match(srcDoc, /NEVER treat an <iframe> tag by itself as rendered visible creative/);
+  // Must NEVER treat an empty about:blank nested <iframe> tag alone as 'loaded' or 'preview_unsupported'
+  assert.match(srcDoc, /NEVER treat an <iframe> tag or empty about:blank frame as rendered visible creative/);
   assert.match(srcDoc, /postStatus\(\s*'script_loaded'/);
+  assert.match(srcDoc, /postStatus\(\s*'iframe_created'/);
   assert.match(srcDoc, /postStatus\(\s*'loaded'/);
+  assert.match(srcDoc, /postStatus\(\s*'rendering_blocked'/);
   assert.match(srcDoc, /postStatus\(\s*'script_blocked'/);
   assert.match(srcDoc, /postStatus\(\s*'error'/);
   assert.match(srcDoc, /postStatus\(\s*'preview_unsupported'/);
   assert.match(srcDoc, /postStatus\(\s*'no_inventory'/);
   assert.match(srcDoc, /postStatus\(\s*'popunder_ready'/);
 
-  // 4. AdSlot UI distinguishes all required states, keeps custom/image banners visible, explains published testing for unsupported providers, and preserves strict sandbox isolation
+  // 4. Audience safety & URL hygiene validation rejects hijack redirects / adult keywords and strips invisible formatting chars
+  const dirtyUrlCheck = validateSafeHttpUrl('https://example.com/offer\u2060');
+  assert.equal(dirtyUrlCheck.valid, true);
+  assert.equal(dirtyUrlCheck.sanitized, 'https://example.com/offer');
+
+  const hijackPayload = validateAdPayload({
+    adType: 'custom_html_js',
+    scriptCode: '<script>window.top.location = "https://spam.example.com";</script>',
+    placementId: 'plc_1',
+    width: '300px',
+    height: '250px',
+    status: 'active',
+    priority: 10,
+  });
+  assert.equal(hijackPayload.valid, false);
+  assert.match(hijackPayload.error || '', /top-frame navigation hijack/i);
+
+  const adultPayload = validateAdPayload({
+    adType: 'banner',
+    scriptCode: '<a href="https://example.com/xxx-promo">Banner</a>',
+    placementId: 'plc_1',
+    width: '300px',
+    height: '250px',
+    status: 'active',
+    priority: 10,
+  });
+  assert.equal(adultPayload.valid, false);
+  assert.match(adultPayload.error || '', /audience/i);
+
+  // 5. AdSlot UI distinguishes all required states, keeps custom/image banners visible, explains published testing for unsupported providers, and preserves strict sandbox isolation
   const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
   assert.doesNotMatch(adSlotSource, /allow-same-origin/);
   assert.doesNotMatch(adSlotSource, /Creative rendered inside sandboxed iframe/);
   assert.match(adSlotSource, /Script Loaded/);
+  assert.match(adSlotSource, /Iframe Created/);
   assert.match(adSlotSource, /Preview Unsupported/);
   assert.match(adSlotSource, /Live preview unavailable for this advertising provider\./);
   assert.match(adSlotSource, /save this advertisement and test it on the actual published website/);
   assert.match(adSlotSource, /Ad Rendered/);
-  assert.match(adSlotSource, /Ad Unavailable/);
+  assert.match(adSlotSource, /Rendering Blocked/);
+  assert.match(adSlotSource, /No Inventory/);
   assert.match(adSlotSource, /Script Blocked/);
   assert.match(adSlotSource, /Script Error/);
   assert.match(adSlotSource, /ResizeObserver/);

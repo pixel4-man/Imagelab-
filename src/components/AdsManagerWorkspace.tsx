@@ -1416,6 +1416,9 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                   placeholder="<script async src='...'></script>&#10;<!-- Or Adsterra snippet, HTML banner, or direct https:// image banner URL -->"
                   className="w-full p-3.5 rounded-xl bg-[#F4EDE4]/70 border border-[#264653]/15 font-mono text-xs leading-relaxed text-[#264653]"
                 />
+                <p className="mt-1.5 text-[11px] text-[#264653]/65">
+                  Audience safety: snippets run in a strict sandbox blocking top-page redirects, and explicit adult/gambling/hijack code is screened out. Ensure brand-safe (no adult/erotic/gambling) filters are enabled in your ad network zone dashboard.
+                </p>
               </div>
 
               {inlinePreviewOpen && liveDraftPreviewAd && (
