@@ -1211,12 +1211,16 @@ test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects
   assert.match(modalSlice, /Preview Advertisement/);
   assert.match(modalSlice, /Selected Website Placement/);
 
-  // 6. Public empty-ad collapsing & VisualPlacementOverlay preview + return route preservation
+  // 6. Public empty-ad collapsing on real errors/no-fill while allowing cross-origin provider frames to render live at configured dimensions
   const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
   assert.match(adSlotSource, /LivePublicAdItem/);
   assert.match(
     adSlotSource,
-    /status === 'no_inventory' \|\|\s*status === 'script_blocked' \|\|\s*status === 'error' \|\|\s*status === 'preview_unsupported'/
+    /status === 'no_inventory' \|\| status === 'script_blocked' \|\| status === 'error'/
+  );
+  assert.match(
+    adSlotSource,
+    /isVisible = status === 'loaded' \|\| status === 'preview_unsupported'/
   );
   assert.match(adSlotSource, /sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"/);
   assert.doesNotMatch(adSlotSource, /allow-same-origin/);
@@ -1376,16 +1380,18 @@ test('22. Adsterra official code parsing, sandbox compatibility, zero-false-posi
   assert.match(srcDoc, /postStatus\(\s*'no_inventory'/);
   assert.match(srcDoc, /postStatus\(\s*'popunder_ready'/);
 
-  // 4. AdSlot UI distinguishes all 6 states, avoids blank white container on error/empty, offers Desktop/Mobile toggle, and preserves strict sandbox isolation
+  // 4. AdSlot UI distinguishes all required states, keeps custom/image banners visible, explains published testing for unsupported providers, and preserves strict sandbox isolation
   const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
   assert.doesNotMatch(adSlotSource, /allow-same-origin/);
   assert.doesNotMatch(adSlotSource, /Creative rendered inside sandboxed iframe/);
-  assert.match(adSlotSource, /Ad Successfully Rendered/);
   assert.match(adSlotSource, /Script Loaded/);
-  assert.match(adSlotSource, /No Ad Inventory Available/);
+  assert.match(adSlotSource, /Preview Unsupported/);
+  assert.match(adSlotSource, /Live preview unavailable for this advertising provider\./);
+  assert.match(adSlotSource, /save this advertisement and test it on the actual published website/);
+  assert.match(adSlotSource, /Ad Rendered/);
+  assert.match(adSlotSource, /Ad Unavailable/);
   assert.match(adSlotSource, /Script Blocked/);
   assert.match(adSlotSource, /Script Error/);
-  assert.match(adSlotSource, /Preview Unsupported by Provider/);
   assert.match(adSlotSource, /ResizeObserver/);
   assert.match(adSlotSource, /max-w-\[375px\]/);
 });

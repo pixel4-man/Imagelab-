@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
-  Eye,
   Info,
   Loader2,
   Monitor,
@@ -234,8 +233,8 @@ export function SandboxedAdFrame({
 }
 
 /**
- * Renders an active public advertisement safely and collapses cleanly
- * whenever no fill / blocked / error / unsupported output occurs so empty boxes never appear.
+ * Renders an active public advertisement inside its isolated sandboxed container
+ * with configured dimensions, collapsing cleanly on no_inventory, script_blocked, or error.
  */
 export function LivePublicAdItem({
   ad,
@@ -249,7 +248,10 @@ export function LivePublicAdItem({
   const handleStatus = useCallback(
     (nextStatus: AdRenderStatus) => {
       setStatus(nextStatus);
-      onVisibilityChange?.(ad.id, nextStatus === 'loaded');
+      onVisibilityChange?.(
+        ad.id,
+        nextStatus === 'loaded' || nextStatus === 'preview_unsupported'
+      );
     },
     [ad.id, onVisibilityChange]
   );
@@ -259,16 +261,11 @@ export function LivePublicAdItem({
     return () => onVisibilityChange?.(ad.id, false);
   }, [ad.id, onVisibilityChange]);
 
-  if (
-    status === 'no_inventory' ||
-    status === 'script_blocked' ||
-    status === 'error' ||
-    status === 'preview_unsupported'
-  ) {
+  if (status === 'no_inventory' || status === 'script_blocked' || status === 'error') {
     return null;
   }
 
-  const isVisible = status === 'loaded';
+  const isVisible = status === 'loaded' || status === 'preview_unsupported';
 
   return (
     <div
@@ -302,6 +299,54 @@ interface AdSlotProps {
   adOverride?: AdRecord | null;
 }
 
+function getPreviewStatusBadge(status: AdRenderStatus): {
+  label: string;
+  className: string;
+} {
+  switch (status) {
+    case 'script_loaded':
+      return {
+        label: 'Script Loaded',
+        className: 'bg-[#264653]/10 text-[#264653]',
+      };
+    case 'preview_unsupported':
+      return {
+        label: 'Preview Unsupported',
+        className: 'bg-[#264653]/12 text-[#264653]',
+      };
+    case 'loaded':
+      return {
+        label: 'Ad Rendered',
+        className: 'bg-[#2A9D8F]/15 text-[#218175]',
+      };
+    case 'no_inventory':
+      return {
+        label: 'Ad Unavailable',
+        className: 'bg-[#E9C46A]/35 text-[#7A530B]',
+      };
+    case 'script_blocked':
+      return {
+        label: 'Script Blocked',
+        className: 'bg-[#E76F51]/15 text-[#9A3412]',
+      };
+    case 'error':
+      return {
+        label: 'Script Error',
+        className: 'bg-[#E76F51]/15 text-[#9A3412]',
+      };
+    case 'popunder_ready':
+      return {
+        label: 'Popunder Ready',
+        className: 'bg-[#264653]/10 text-[#264653]',
+      };
+    default:
+      return {
+        label: 'Loading Preview',
+        className: 'bg-[#264653]/8 text-[#264653]/75',
+      };
+  }
+}
+
 export function AdSlot({
   placementId,
   placementName,
@@ -312,7 +357,6 @@ export function AdSlot({
   const [status, setStatus] = useState<AdRenderStatus>('loading');
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [viewportMode, setViewportMode] = useState<'desktop' | 'mobile'>('desktop');
-  const [showRawUnsupportedFrame, setShowRawUnsupportedFrame] = useState(false);
 
   const handleStatus = useCallback((nextStatus: AdRenderStatus, msg?: string) => {
     setStatus(nextStatus);
@@ -322,7 +366,6 @@ export function AdSlot({
   useEffect(() => {
     setStatus('loading');
     setStatusMessage('');
-    setShowRawUnsupportedFrame(false);
   }, [adOverride?.id, adOverride?.scriptCode, adOverride?.width, adOverride?.height, adOverride?.adType]);
 
   if (!adOverride) return null;
@@ -346,7 +389,7 @@ export function AdSlot({
 
   const isPendingState = status === 'loading' || status === 'script_loaded';
   const isRendered = status === 'loaded';
-  const showFrameVisibly = isRendered || (status === 'preview_unsupported' && showRawUnsupportedFrame);
+  const badge = getPreviewStatusBadge(status);
 
   return (
     <aside
@@ -365,6 +408,12 @@ export function AdSlot({
             </span>
             <span className="px-2 py-0.5 rounded-md bg-[#2A9D8F]/12 text-[#218175] text-[11px] font-mono font-semibold">
               {adOverride.provider}
+            </span>
+            <span
+              data-ad-status-badge={status}
+              className={`px-2 py-0.5 rounded-md text-[11px] font-mono font-semibold ${badge.className}`}
+            >
+              {badge.label}
             </span>
           </div>
 
@@ -402,21 +451,21 @@ export function AdSlot({
           </div>
         </div>
 
-        {/* Sandboxed Execution Container: never displays an unexplained blank white box */}
+        {/* Sandboxed Execution Container: shown visibly ONLY when verified creative rendered */}
         <div
           className={
-            showFrameVisibly
+            isRendered
               ? `rounded-xl bg-white border border-[#264653]/12 p-2.5 mx-auto transition-all ${
                   viewportMode === 'mobile' ? 'w-full max-w-[375px]' : 'w-full'
                 }`
               : 'h-0 overflow-hidden opacity-0 pointer-events-none m-0 p-0 border-0'
           }
-          aria-hidden={!showFrameVisibly}
+          aria-hidden={!isRendered}
         >
           <SandboxedAdFrame ad={adOverride} testMode onStatusChange={handleStatus} />
         </div>
 
-        {/* Status-Specific Diagnostics (Strictly Distinguishes All 6 States) */}
+        {/* Distinct Status Diagnostics */}
         {isPendingState && (
           <div
             role="status"
@@ -431,7 +480,7 @@ export function AdSlot({
                 {statusMessage ||
                   (status === 'script_loaded'
                     ? 'External ad script loaded; verifying visible creative output...'
-                    : 'Executing submitted snippet inside isolated sandbox without parent DOM or auth access...')}
+                    : 'Executing submitted snippet inside isolated sandbox without parent DOM, cookies, or auth access...')}
               </p>
             </div>
           </div>
@@ -444,7 +493,7 @@ export function AdSlot({
           >
             <CheckCircle2 className="w-4 h-4 text-[#2A9D8F] shrink-0 mt-0.5" />
             <div className="space-y-0.5">
-              <p className="font-bold text-[#218175]">Ad Successfully Rendered</p>
+              <p className="font-bold text-[#218175]">Ad Rendered</p>
               <p className="text-[#264653]/80">
                 {statusMessage || 'Visible creative output verified inside sandboxed container.'}
                 {hasDest && !ownsClickables
@@ -464,7 +513,7 @@ export function AdSlot({
           >
             <Info className="w-4 h-4 text-[#9A6B13] shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <p className="font-bold text-[#7A530B]">No Ad Inventory Available</p>
+              <p className="font-bold text-[#7A530B]">Ad Unavailable</p>
               <p className="text-[#264653]/85 leading-relaxed">
                 {statusMessage ||
                   'The advertisement script loaded and ran without errors, but returned no ad inventory or visible creative.'}
@@ -507,32 +556,23 @@ export function AdSlot({
 
         {status === 'preview_unsupported' && (
           <div
-            role="alert"
-            className="rounded-xl bg-[#264653]/7 border border-[#264653]/20 px-3.5 py-3 space-y-2 text-xs text-[#264653]"
+            role="status"
+            className="rounded-xl bg-[#264653]/7 border border-[#264653]/20 px-3.5 py-3 flex items-start gap-2.5 text-xs text-[#264653]"
           >
-            <div className="flex items-start gap-2.5">
-              <ShieldAlert className="w-4 h-4 text-[#264653] shrink-0 mt-0.5" />
-              <div className="space-y-1">
-                <p className="font-bold text-[#264653]">Preview Unsupported by Provider</p>
-                <p className="text-[#264653]/80 leading-relaxed">
-                  {statusMessage ||
-                    'External script loaded cleanly, but the provider mounted a cross-origin frame whose creative output cannot be verified or rendered inside an opaque-origin sandboxed preview (strict isolation remains active to protect parent DOM and Firebase credentials).'}
+            <ShieldAlert className="w-4 h-4 text-[#264653] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold text-[#264653]">Preview Unsupported</p>
+              <p className="font-medium text-[#264653]">
+                Live preview unavailable for this advertising provider.
+              </p>
+              <p className="text-[#264653]/80 leading-relaxed">
+                Strict sandbox isolation remains enabled so parent DOM, Firebase authentication tokens, cookies, and private data are never exposed. You can still save this advertisement and test it on the actual published website, where it renders inside its isolated ad container at {displayWidth} × {displayHeight}.
+              </p>
+              {statusMessage && (
+                <p className="text-[11px] font-mono text-[#264653]/70 pt-0.5">
+                  {statusMessage}
                 </p>
-              </div>
-            </div>
-            <div className="pl-6">
-              <button
-                type="button"
-                onClick={() => setShowRawUnsupportedFrame((v) => !v)}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white border border-[#264653]/18 text-[11px] font-semibold text-[#264653] hover:bg-[#F4EDE4]"
-              >
-                <Eye className="w-3.5 h-3.5" />
-                <span>
-                  {showRawUnsupportedFrame
-                    ? 'Hide Raw Sandbox Frame'
-                    : 'Inspect Raw Sandbox Output'}
-                </span>
-              </button>
+              )}
             </div>
           </div>
         )}

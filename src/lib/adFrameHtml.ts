@@ -126,10 +126,17 @@ export function buildSandboxedAdSrcDoc(
       : preprocessedCreative;
 
   const isPopunder = ad.adType === 'popunder';
-  const expectedMinWidth =
-    ad.width && ad.width !== 'auto' ? ad.width : atMeta.width || 'auto';
-  const expectedMinHeight =
-    ad.height && ad.height !== 'auto' ? ad.height : atMeta.height || 'auto';
+  const normalizeCssDimension = (val?: string): string => {
+    const trimmed = String(val || '').trim();
+    if (!trimmed || trimmed === 'auto') return 'auto';
+    return /^\d+$/.test(trimmed) ? `${trimmed}px` : trimmed;
+  };
+  const expectedMinWidth = normalizeCssDimension(
+    ad.width && ad.width !== 'auto' ? ad.width : atMeta.width || 'auto'
+  );
+  const expectedMinHeight = normalizeCssDimension(
+    ad.height && ad.height !== 'auto' ? ad.height : atMeta.height || 'auto'
+  );
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -184,6 +191,7 @@ export function buildSandboxedAdSrcDoc(
     var imageErrors = [];
     var lastEmittedStatus = '';
     var hasSettledFinal = false;
+    var crossOriginSettleTimer = null;
 
     function upgradeUrl(url) {
       if (typeof url !== 'string') return url;
@@ -664,6 +672,24 @@ export function buildSandboxedAdSrcDoc(
       return { total: externalScripts.length, loaded: loaded, pending: pending, failed: failed };
     }
 
+    function hasLoadedCrossOriginFrame() {
+      for (var i = 0; i < nestedFrames.length; i++) {
+        var f = nestedFrames[i];
+        if (f && f.loadFired && !f.errorFired) {
+          var s = String(f.src || '');
+          if (s && !/^about:/i.test(s)) return true;
+        }
+      }
+      return false;
+    }
+
+    function clearCrossOriginTimer() {
+      if (crossOriginSettleTimer) {
+        clearTimeout(crossOriginSettleTimer);
+        crossOriginSettleTimer = null;
+      }
+    }
+
     window.__imagelabAdProbe = {
       report: function (isFinal) {
         var root = document.getElementById('ad-root');
@@ -671,13 +697,14 @@ export function buildSandboxedAdSrcDoc(
         var stats = countScriptStats();
 
         var docHeight = Math.max(
-          root ? Math.ceil(root.getBoundingClientRect().height || 0) : 0,
-          document.body ? document.body.scrollHeight : 0,
-          document.documentElement ? document.documentElement.scrollHeight : 0
+          root && root.getBoundingClientRect ? Math.ceil(root.getBoundingClientRect().height || 0) : 0,
+          document.body ? Number(document.body.scrollHeight || 0) : 0,
+          document.documentElement ? Number(document.documentElement.scrollHeight || 0) : 0
         );
 
         // 1. Confirmed visible creative always wins
         if (res.visible) {
+          clearCrossOriginTimer();
           hasSettledFinal = true;
           postStatus(
             'loaded',
@@ -689,6 +716,7 @@ export function buildSandboxedAdSrcDoc(
 
         // 2. External script or nested frame was blocked / unreachable
         if (blockedResources.length > 0 && (stats.pending === 0 || isFinal)) {
+          clearCrossOriginTimer();
           hasSettledFinal = true;
           var firstBlock = blockedResources[0];
           postStatus(
@@ -702,6 +730,7 @@ export function buildSandboxedAdSrcDoc(
         // 3. JavaScript runtime exception or broken image asset
         var brokenImgUrl = imageErrors[0] || (res.brokenImages && res.brokenImages[0]) || '';
         if ((runtimeErrors.length > 0 || brokenImgUrl) && (stats.pending === 0 || isFinal)) {
+          clearCrossOriginTimer();
           hasSettledFinal = true;
           var errMsg = runtimeErrors[0]
             ? 'Script runtime error: ' + runtimeErrors[0]
@@ -710,18 +739,30 @@ export function buildSandboxedAdSrcDoc(
           return;
         }
 
-        // 4. Intermediate progress signal: external scripts loaded, inspecting fill
-        if (!isFinal && !hasSettledFinal && stats.total > 0 && stats.loaded > 0 && stats.pending === 0) {
-          postStatus(
-            'script_loaded',
-            0,
-            'External ad script loaded (' + stats.loaded + '/' + stats.total + '); inspecting rendered creative...'
-          );
+        // 4. Intermediate progress signal: external scripts loaded, inspecting fill / nested frames
+        if (!isFinal && !hasSettledFinal) {
+          if (res.crossOriginFrames.length > 0 && stats.pending === 0 && hasLoadedCrossOriginFrame() && !crossOriginSettleTimer) {
+            crossOriginSettleTimer = setTimeout(function () {
+              crossOriginSettleTimer = null;
+              if (window.__imagelabAdProbe) {
+                window.__imagelabAdProbe.report(true);
+              }
+            }, 250);
+          }
+
+          if (stats.total > 0 && stats.loaded > 0 && stats.pending === 0) {
+            postStatus(
+              'script_loaded',
+              0,
+              'External ad script loaded (' + stats.loaded + '/' + stats.total + '); checking creative output...'
+            );
+          }
           return;
         }
 
         // 5. Final settle evaluation (never report 'loaded' when visually empty!)
         if (isFinal && !hasSettledFinal) {
+          clearCrossOriginTimer();
           hasSettledFinal = true;
           if (isPopunder) {
             postStatus(
@@ -736,12 +777,10 @@ export function buildSandboxedAdSrcDoc(
             var frameHost = res.crossOriginFrames[0].host || providerName;
             postStatus(
               'preview_unsupported',
-              0,
-              'External script loaded and mounted a cross-origin frame (' +
+              docHeight,
+              'External script loaded cleanly and mounted an isolated cross-origin frame (' +
                 frameHost +
-                '), but ' +
-                providerName +
-                ' creative visibility cannot be verified or filled inside an opaque-origin sandboxed preview (strict isolation is active to protect parent DOM and Firebase auth tokens).'
+                '). Strict sandbox protection remains active; you can save and test this ad on the actual published website.'
             );
             return;
           }
@@ -749,7 +788,7 @@ export function buildSandboxedAdSrcDoc(
           var noFillMsg = stats.loaded > 0
             ? providerName + ' script loaded (' + stats.loaded + ' script' + (stats.loaded > 1 ? 's' : '') + ') without errors, but returned no ad inventory or visible creative.'
             : (atFormat === 'iframe'
-              ? providerName + ' snippet executed without errors, but no visible creative was produced.'
+              ? providerName + ' snippet executed without errors, but no creative fill was returned.'
               : 'Advertisement snippet executed without errors, but produced no visible creative output.');
           postStatus('no_inventory', 0, noFillMsg);
         }
