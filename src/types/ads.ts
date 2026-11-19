@@ -165,7 +165,9 @@ export function detectAdProvider(scriptCode: string): string {
     code.includes('adsterra') ||
     code.includes('highperformanceformat') ||
     code.includes('effectivegatecpm') ||
+    code.includes('effectivecreativeformat') ||
     code.includes('profitabledisplaynetwork') ||
+    code.includes('profitabledisplayformat') ||
     code.includes('profitablecpmrate') ||
     code.includes('topcreativeformat') ||
     code.includes('toprevenuegate') ||
@@ -209,6 +211,40 @@ export function detectAdProvider(scriptCode: string): string {
     return 'Custom Banner';
   }
   return 'Custom Ad';
+}
+
+export interface AtOptionsMetadata {
+  key?: string;
+  format?: string;
+  width?: string;
+  height?: string;
+}
+
+/**
+ * Safely extracts configured width, height, format, and zone key from Adsterra `atOptions` snippets
+ * without executing arbitrary JavaScript.
+ */
+export function extractAtOptionsMetadata(scriptCode: string): AtOptionsMetadata {
+  const code = scriptCode || '';
+  if (!/\batOptions\b/i.test(code)) return {};
+
+  const blockMatch = code.match(/\batOptions\s*=\s*\{([\s\S]*?)\}/);
+  const target = blockMatch ? blockMatch[1] : code;
+
+  const widthMatch = target.match(/['"]?width['"]?\s*:\s*['"]?(\d{2,4})['"]?/i);
+  const heightMatch = target.match(/['"]?height['"]?\s*:\s*['"]?(\d{2,4})['"]?/i);
+  const formatMatch = target.match(/['"]?format['"]?\s*:\s*['"]([a-zA-Z0-9_-]+)['"]/i);
+  const keyMatch = target.match(/['"]?key['"]?\s*:\s*['"]([a-zA-Z0-9_-]{8,64})['"]/i);
+
+  const widthNum = widthMatch ? parseInt(widthMatch[1], 10) : NaN;
+  const heightNum = heightMatch ? parseInt(heightMatch[1], 10) : NaN;
+
+  return {
+    key: keyMatch ? keyMatch[1] : undefined,
+    format: formatMatch ? formatMatch[1].toLowerCase() : undefined,
+    width: Number.isFinite(widthNum) && widthNum > 0 && widthNum <= 2500 ? `${widthNum}px` : undefined,
+    height: Number.isFinite(heightNum) && heightNum > 0 && heightNum <= 2500 ? `${heightNum}px` : undefined,
+  };
 }
 
 export function deriveInternalAdName(params: {

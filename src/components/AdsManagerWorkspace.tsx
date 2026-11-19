@@ -37,6 +37,7 @@ import {
   VisualPlacementRecord,
   deriveInternalAdName,
   detectAdProvider,
+  extractAtOptionsMetadata,
   formatReadableError,
   getAdTypeLabel,
   validateSafeHttpUrl,
@@ -539,14 +540,19 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   const liveDraftPreviewAd: AdRecord | null = useMemo(() => {
     if (!inlinePreviewOpen || formState.scriptCode.trim().length < 5) return null;
     const provider = detectAdProvider(formState.scriptCode);
+    const atMeta = extractAtOptionsMetadata(formState.scriptCode);
     const resolvedWidth =
       formState.width && formState.width !== 'auto'
         ? formState.width
-        : selectedPlacementObj?.width || 'auto';
+        : selectedPlacementObj?.width && selectedPlacementObj.width !== 'auto'
+          ? selectedPlacementObj.width
+          : atMeta.width || 'auto';
     const resolvedHeight =
       formState.height && formState.height !== 'auto'
         ? formState.height
-        : selectedPlacementObj?.height || 'auto';
+        : selectedPlacementObj?.height && selectedPlacementObj.height !== 'auto'
+          ? selectedPlacementObj.height
+          : atMeta.height || 'auto';
     const destCheck = validateSafeHttpUrl(formState.destinationUrl);
     return {
       id: `${editingAdId || 'preview_draft'}_v${inlinePreviewVersion}`,
@@ -1812,9 +1818,9 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
           role="dialog"
           aria-modal="true"
           aria-labelledby="ad-preview-title"
-          className="fixed inset-0 z-[60] bg-[#264653]/65 backdrop-blur-xs flex items-center justify-center p-4"
+          className="fixed inset-0 z-[60] bg-[#264653]/65 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto"
         >
-          <div className="w-full max-w-3xl rounded-3xl bg-[#FAF7F2] border border-[#264653]/15 shadow-2xl p-6 sm:p-8 space-y-5">
+          <div className="w-full max-w-3xl rounded-3xl bg-[#FAF7F2] border border-[#264653]/15 shadow-2xl p-6 sm:p-8 space-y-5 my-8 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold text-[#2A9D8F]">
@@ -1831,13 +1837,23 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                       previewAd.placementId}
                   </strong>{' '}
                   · Format: {getAdTypeLabel(previewAd.adType)} · Size:{' '}
-                  {previewAd.width !== 'auto'
-                    ? previewAd.width
-                    : placementMap.get(previewAd.placementId)?.width || 'auto'}{' '}
-                  ×{' '}
-                  {previewAd.height !== 'auto'
-                    ? previewAd.height
-                    : placementMap.get(previewAd.placementId)?.height || 'auto'}
+                  {(() => {
+                    const atMeta = extractAtOptionsMetadata(previewAd.scriptCode);
+                    const p = placementMap.get(previewAd.placementId);
+                    const w =
+                      previewAd.width !== 'auto'
+                        ? previewAd.width
+                        : p?.width && p.width !== 'auto'
+                          ? p.width
+                          : atMeta.width || 'auto';
+                    const h =
+                      previewAd.height !== 'auto'
+                        ? previewAd.height
+                        : p?.height && p.height !== 'auto'
+                          ? p.height
+                          : atMeta.height || 'auto';
+                    return `${w} × ${h}`;
+                  })()}
                 </p>
               </div>
               <button
@@ -1860,11 +1876,17 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                   width:
                     previewAd.width !== 'auto'
                       ? previewAd.width
-                      : placementMap.get(previewAd.placementId)?.width || 'auto',
+                      : placementMap.get(previewAd.placementId)?.width &&
+                          placementMap.get(previewAd.placementId)?.width !== 'auto'
+                        ? placementMap.get(previewAd.placementId)!.width
+                        : extractAtOptionsMetadata(previewAd.scriptCode).width || 'auto',
                   height:
                     previewAd.height !== 'auto'
                       ? previewAd.height
-                      : placementMap.get(previewAd.placementId)?.height || 'auto',
+                      : placementMap.get(previewAd.placementId)?.height &&
+                          placementMap.get(previewAd.placementId)?.height !== 'auto'
+                        ? placementMap.get(previewAd.placementId)!.height
+                        : extractAtOptionsMetadata(previewAd.scriptCode).height || 'auto',
                 }}
               />
             </div>

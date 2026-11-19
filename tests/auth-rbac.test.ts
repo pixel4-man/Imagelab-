@@ -17,6 +17,7 @@ import {
 } from '../src/lib/profileSync.ts';
 import {
   detectAdProvider,
+  extractAtOptionsMetadata,
   findDuplicatePlacement,
   formatReadableError,
   hasOwnInteractiveOrScriptElements,
@@ -27,7 +28,10 @@ import {
   validatePlacementPayload,
   validateSafeHttpUrl,
 } from '../src/types/ads.ts';
-import { buildSandboxedAdSrcDoc } from '../src/lib/adFrameHtml.ts';
+import {
+  buildSandboxedAdSrcDoc,
+  preprocessCreativeForSandbox,
+} from '../src/lib/adFrameHtml.ts';
 import {
   callJsonApiWithFallback,
   isJsonContentType,
@@ -465,8 +469,9 @@ test('12. Visual Placement Selector wires data-ad-slot anchors, touch/dblclick o
     path.resolve(process.cwd(), 'src/components/AdSlot.tsx'),
     'utf-8'
   );
-  assert.match(adSlotSource, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
-  assert.match(adSlotSource, /Preview Test Mode/);
+  assert.match(adSlotSource, /sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"/);
+  assert.doesNotMatch(adSlotSource, /allow-same-origin/);
+  assert.match(adSlotSource, /Preview ·/);
   assert.match(adSlotSource, /\/api\/ads\/active/);
 
   const adsWorkspaceSource = fs.readFileSync(
@@ -1209,8 +1214,11 @@ test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects
   // 6. Public empty-ad collapsing & VisualPlacementOverlay preview + return route preservation
   const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
   assert.match(adSlotSource, /LivePublicAdItem/);
-  assert.match(adSlotSource, /if \(status === 'empty' \|\| status === 'error'\) \{\s*return null;\s*\}/);
-  assert.match(adSlotSource, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.match(
+    adSlotSource,
+    /status === 'no_inventory' \|\|\s*status === 'script_blocked' \|\|\s*status === 'error' \|\|\s*status === 'preview_unsupported'/
+  );
+  assert.match(adSlotSource, /sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"/);
   assert.doesNotMatch(adSlotSource, /allow-same-origin/);
 
   const injectorSource = fs.readFileSync(
@@ -1297,3 +1305,88 @@ test('21. Two-column 9:16 Instagram-style gallery, image-only tiles, authenticat
   const rulesSource = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
   assert.match(rulesSource, /!\('promptText' in incoming\(\)\)/);
 });
+
+test('22. Adsterra official code parsing, sandbox compatibility, zero-false-positive visibility probe, and 6-state diagnostics hold', () => {
+  // 1. Official Adsterra atOptions metadata extraction
+  const officialAdsterraSnippet = `
+    <script type="text/javascript">
+      const atOptions = {
+        'key' : 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4',
+        'format' : 'iframe',
+        'height' : 250,
+        'width' : 300,
+        'params' : {}
+      };
+      document.write('<scr' + 'ipt type="text/javascript" src="http' + (location.protocol === 'https:' ? 's' : '') + '://www.highperformanceformat.com/a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4/invoke.js"></scr' + 'ipt>');
+    </script>
+  `;
+  const meta = extractAtOptionsMetadata(officialAdsterraSnippet);
+  assert.equal(meta.key, 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4');
+  assert.equal(meta.format, 'iframe');
+  assert.equal(meta.width, '300px');
+  assert.equal(meta.height, '250px');
+  assert.equal(detectAdProvider(officialAdsterraSnippet), 'Adsterra');
+
+  // 2. Preprocessor fixes about:srcdoc protocol downgrade & block-scoped atOptions while preserving execution order
+  const preprocessed = preprocessCreativeForSandbox(officialAdsterraSnippet, { isHttps: true });
+  assert.match(preprocessed, /\bvar atOptions\b/);
+  assert.doesNotMatch(preprocessed, /\bconst atOptions\b/);
+  assert.match(preprocessed, /'s'/);
+  assert.doesNotMatch(preprocessed, /location\.protocol === 'https:' \? 's' : ''/);
+
+  const twoTagAdsterra = `<script>atOptions={'key':'k12345678','format':'iframe','height':90,'width':728,'params':{}};</script><script src="//www.topcreativeformat.com/k12345678/invoke.js"></script>`;
+  const preprocessedTwoTag = preprocessCreativeForSandbox(twoTagAdsterra, { isHttps: true });
+  assert.match(preprocessedTwoTag, /https:\/\/www\.topcreativeformat\.com\/k12345678\/invoke\.js/);
+  assert.ok(
+    preprocessedTwoTag.indexOf('atOptions=') < preprocessedTwoTag.indexOf('invoke.js'),
+    'atOptions configuration must execute before external invoke.js'
+  );
+
+  // 3. Sandboxed srcDoc includes storage/cookie isolation shims, safe document.write wrapper, and strict zero-false-positive detection
+  const srcDoc = buildSandboxedAdSrcDoc(
+    {
+      id: 'ad_adsterra_probe_1',
+      name: 'Adsterra Test',
+      provider: 'Adsterra',
+      adType: 'banner',
+      scriptCode: officialAdsterraSnippet,
+      placementId: 'plc_1',
+      width: 'auto',
+      height: 'auto',
+      status: 'active',
+      priority: 1,
+      createdAt: '',
+      updatedAt: '',
+    },
+    { isHttps: true }
+  );
+
+  assert.match(srcDoc, /min-width:\s*300px/);
+  assert.match(srcDoc, /min-height:\s*250px/);
+  assert.match(srcDoc, /createMemoryStorage/);
+  assert.match(srcDoc, /appendMarkupSafelyAfterLoad/);
+  assert.match(srcDoc, /securitypolicyviolation/);
+  // Must NEVER treat an empty nested <iframe> tag alone as 'loaded'
+  assert.match(srcDoc, /NEVER treat an <iframe> tag by itself as rendered visible creative/);
+  assert.match(srcDoc, /postStatus\(\s*'script_loaded'/);
+  assert.match(srcDoc, /postStatus\(\s*'loaded'/);
+  assert.match(srcDoc, /postStatus\(\s*'script_blocked'/);
+  assert.match(srcDoc, /postStatus\(\s*'error'/);
+  assert.match(srcDoc, /postStatus\(\s*'preview_unsupported'/);
+  assert.match(srcDoc, /postStatus\(\s*'no_inventory'/);
+  assert.match(srcDoc, /postStatus\(\s*'popunder_ready'/);
+
+  // 4. AdSlot UI distinguishes all 6 states, avoids blank white container on error/empty, offers Desktop/Mobile toggle, and preserves strict sandbox isolation
+  const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
+  assert.doesNotMatch(adSlotSource, /allow-same-origin/);
+  assert.doesNotMatch(adSlotSource, /Creative rendered inside sandboxed iframe/);
+  assert.match(adSlotSource, /Ad Successfully Rendered/);
+  assert.match(adSlotSource, /Script Loaded/);
+  assert.match(adSlotSource, /No Ad Inventory Available/);
+  assert.match(adSlotSource, /Script Blocked/);
+  assert.match(adSlotSource, /Script Error/);
+  assert.match(adSlotSource, /Preview Unsupported by Provider/);
+  assert.match(adSlotSource, /ResizeObserver/);
+  assert.match(adSlotSource, /max-w-\[375px\]/);
+});
+

@@ -1,8 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  Eye,
+  Info,
+  Loader2,
+  Monitor,
+  ShieldAlert,
+  Smartphone,
+} from 'lucide-react';
 import { ActiveAdState, fetchPublicActiveAds } from '../lib/adsPersistence';
-import { buildSandboxedAdSrcDoc } from '../lib/adFrameHtml';
+import { AdFrameRenderStatus, buildSandboxedAdSrcDoc } from '../lib/adFrameHtml';
 import {
   AdRecord,
+  extractAtOptionsMetadata,
   hasOwnInteractiveOrScriptElements,
   normalizePageRoute,
   validateSafeHttpUrl,
@@ -13,12 +24,31 @@ export const ADS_UPDATED_EVENT = 'imagelab-ads-updated';
 const ADS_STORAGE_SYNC_KEY = 'imagelab_ads_sync_ts';
 export type { ActiveAdState };
 
-export type AdRenderStatus = 'loading' | 'loaded' | 'empty' | 'error' | 'popunder_ready';
+export type AdRenderStatus = AdFrameRenderStatus;
 
 let cachedActiveState: ActiveAdState | null = null;
 let cachedAt = 0;
 let inflightStateRequest: Promise<ActiveAdState> | null = null;
 const CACHE_TTL_MS = 15_000;
+
+function hashString(input: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function parsePixelDimension(raw?: string): number | null {
+  if (!raw || raw === 'auto') return null;
+  const trimmed = raw.trim().toLowerCase();
+  if (/^\d+(px)?$/.test(trimmed)) {
+    const n = parseInt(trimmed, 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  return null;
+}
 
 export function notifyActiveAdsUpdated() {
   cachedActiveState = null;
@@ -73,29 +103,47 @@ export function SandboxedAdFrame({
   testMode?: boolean;
   onStatusChange?: (status: AdRenderStatus, message?: string) => void;
 }) {
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const onStatusRef = useRef(onStatusChange);
   onStatusRef.current = onStatusChange;
 
+  const atMeta = useMemo(() => extractAtOptionsMetadata(ad.scriptCode), [ad.scriptCode]);
+  const effectiveWidth =
+    ad.width && ad.width !== 'auto' ? ad.width : atMeta.width || 'auto';
+  const effectiveHeight =
+    ad.height && ad.height !== 'auto' ? ad.height : atMeta.height || 'auto';
+
+  const fixedWidthPx = parsePixelDimension(effectiveWidth);
+  const fixedHeightPx = parsePixelDimension(effectiveHeight);
+
+  const [containerWidth, setContainerWidth] = useState<number>(0);
   const [autoHeight, setAutoHeight] = useState<number>(() => {
-    if (ad.height !== 'auto') {
-      const parsed = parseInt(ad.height, 10);
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : 110;
-    }
+    if (fixedHeightPx) return fixedHeightPx;
     if (ad.adType === 'native_ad') return 140;
     if (ad.adType === 'responsive_banner') return 100;
     return 96;
   });
 
   useEffect(() => {
-    if (ad.height !== 'auto') {
-      const parsed = parseInt(ad.height, 10);
-      if (Number.isFinite(parsed) && parsed > 0) {
-        setAutoHeight(parsed);
-      }
+    const el = wrapperRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const nextWidth = Math.floor(el.getBoundingClientRect().width || 0);
+      if (nextWidth > 0) setContainerWidth(nextWidth);
+    };
+    measure();
+    const obs = new ResizeObserver(measure);
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (fixedHeightPx) {
+      setAutoHeight(fixedHeightPx);
     }
     onStatusRef.current?.('loading');
-  }, [ad.id, ad.scriptCode, ad.destinationUrl, ad.height, ad.width, ad.adType]);
+  }, [ad.id, ad.scriptCode, ad.destinationUrl, fixedHeightPx, effectiveWidth, ad.adType]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -112,7 +160,7 @@ export function SandboxedAdFrame({
       if (!data || data.type !== 'imagelab-ad-status' || data.id !== ad.id) return;
 
       if (
-        ad.height === 'auto' &&
+        !fixedHeightPx &&
         typeof data.height === 'number' &&
         data.height >= 24 &&
         data.height <= 900
@@ -125,42 +173,69 @@ export function SandboxedAdFrame({
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [ad.id, ad.height]);
+  }, [ad.id, fixedHeightPx]);
 
   const srcDoc = useMemo(() => buildSandboxedAdSrcDoc(ad), [ad]);
 
-  const frameWidth =
-    ad.adType === 'responsive_banner' || ad.adType === 'native_ad' || ad.width === 'auto'
+  const intrinsicWidth =
+    ad.adType === 'responsive_banner' || ad.adType === 'native_ad' || effectiveWidth === 'auto'
       ? '100%'
-      : ad.width;
+      : effectiveWidth;
+  const intrinsicHeightPx = fixedHeightPx || autoHeight;
 
-  const frameKey = `${ad.id}:${ad.adType}:${ad.width}:${ad.height}:${ad.destinationUrl || ''}:${ad.scriptCode.length}`;
+  const scale =
+    fixedWidthPx && containerWidth > 0 && fixedWidthPx > containerWidth
+      ? Math.max(0.25, containerWidth / fixedWidthPx)
+      : 1;
+
+  const scriptHash = useMemo(() => hashString(ad.scriptCode || ''), [ad.scriptCode]);
+  const frameKey = `${ad.id}:${ad.adType}:${effectiveWidth}:${effectiveHeight}:${ad.destinationUrl || ''}:${scriptHash}`;
+
+  const scaledWidthPx = fixedWidthPx ? Math.floor(fixedWidthPx * scale) : null;
+  const scaledHeightPx = Math.ceil(intrinsicHeightPx * scale);
 
   return (
-    <iframe
-      key={frameKey}
-      ref={iframeRef}
-      title={`Advertisement: ${ad.name}`}
-      srcDoc={srcDoc}
-      sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
-      loading="eager"
-      scrolling="no"
-      style={{
-        width: frameWidth,
-        maxWidth: '100%',
-        height: ad.height === 'auto' ? `${autoHeight}px` : ad.height,
-        border: 0,
-        display: 'block',
-        margin: '0 auto',
-        overflow: 'hidden',
-      }}
-    />
+    <div
+      ref={wrapperRef}
+      data-ad-frame-wrapper={testMode ? 'preview' : 'live'}
+      className="w-full flex justify-center overflow-hidden"
+    >
+      <div
+        style={{
+          width: scaledWidthPx ? `${scaledWidthPx}px` : intrinsicWidth,
+          maxWidth: '100%',
+          height: `${scaledHeightPx}px`,
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
+        <iframe
+          key={frameKey}
+          ref={iframeRef}
+          title={`Advertisement: ${ad.name}`}
+          srcDoc={srcDoc}
+          sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+          referrerPolicy="strict-origin-when-cross-origin"
+          loading="eager"
+          scrolling="no"
+          style={{
+            width: fixedWidthPx ? `${fixedWidthPx}px` : intrinsicWidth,
+            height: `${intrinsicHeightPx}px`,
+            border: 0,
+            display: 'block',
+            overflow: 'hidden',
+            transform: scale < 1 ? `scale(${scale})` : undefined,
+            transformOrigin: 'top left',
+          }}
+        />
+      </div>
+    </div>
   );
 }
 
 /**
  * Renders an active public advertisement safely and collapses cleanly
- * whenever no fill / error / zero output occurs so empty boxes never appear.
+ * whenever no fill / blocked / error / unsupported output occurs so empty boxes never appear.
  */
 export function LivePublicAdItem({
   ad,
@@ -184,7 +259,12 @@ export function LivePublicAdItem({
     return () => onVisibilityChange?.(ad.id, false);
   }, [ad.id, onVisibilityChange]);
 
-  if (status === 'empty' || status === 'error') {
+  if (
+    status === 'no_inventory' ||
+    status === 'script_blocked' ||
+    status === 'error' ||
+    status === 'preview_unsupported'
+  ) {
     return null;
   }
 
@@ -230,12 +310,20 @@ export function AdSlot({
   adOverride = null,
 }: AdSlotProps) {
   const [status, setStatus] = useState<AdRenderStatus>('loading');
-  const [errorMessage, setErrorMessage] = useState<string>('');
+  const [statusMessage, setStatusMessage] = useState<string>('');
+  const [viewportMode, setViewportMode] = useState<'desktop' | 'mobile'>('desktop');
+  const [showRawUnsupportedFrame, setShowRawUnsupportedFrame] = useState(false);
 
   const handleStatus = useCallback((nextStatus: AdRenderStatus, msg?: string) => {
     setStatus(nextStatus);
-    setErrorMessage(msg || '');
+    if (msg !== undefined) setStatusMessage(msg);
   }, []);
+
+  useEffect(() => {
+    setStatus('loading');
+    setStatusMessage('');
+    setShowRawUnsupportedFrame(false);
+  }, [adOverride?.id, adOverride?.scriptCode, adOverride?.width, adOverride?.height, adOverride?.adType]);
 
   if (!adOverride) return null;
 
@@ -243,62 +331,225 @@ export function AdSlot({
     return <LivePublicAdItem ad={adOverride} />;
   }
 
+  const atMeta = extractAtOptionsMetadata(adOverride.scriptCode);
+  const displayWidth =
+    adOverride.width && adOverride.width !== 'auto'
+      ? adOverride.width
+      : atMeta.width || 'auto';
+  const displayHeight =
+    adOverride.height && adOverride.height !== 'auto'
+      ? adOverride.height
+      : atMeta.height || 'auto';
+
   const hasDest = Boolean(validateSafeHttpUrl(adOverride.destinationUrl).sanitized);
   const ownsClickables = hasOwnInteractiveOrScriptElements(adOverride.scriptCode);
+
+  const isPendingState = status === 'loading' || status === 'script_loaded';
+  const isRendered = status === 'loaded';
+  const showFrameVisibly = isRendered || (status === 'preview_unsupported' && showRawUnsupportedFrame);
 
   return (
     <aside
       aria-label="Advertisement Preview"
       data-ad-placement-id={placementId || adOverride.placementId}
       data-ad-test-mode="true"
+      data-ad-preview-status={status}
       className={`w-full ${className}`}
     >
-      <div className="rounded-2xl bg-[#FAF7F2] border border-[#264653]/14 p-3 sm:p-4 overflow-hidden space-y-2.5">
+      <div className="rounded-2xl bg-[#FAF7F2] border border-[#264653]/14 p-3 sm:p-4 overflow-hidden space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-          <span className="text-[11px] font-mono text-[#264653]/65">
-            Preview Test Mode · {adOverride.width} × {adOverride.height}
-            {placementName ? ` · ${placementName}` : ''}
-          </span>
-          <span className="text-[11px] font-mono text-[#2A9D8F] font-semibold">
-            {adOverride.provider}
-          </span>
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <span className="text-[11px] font-mono text-[#264653]/75">
+              Preview · {displayWidth} × {displayHeight}
+              {placementName ? ` · ${placementName}` : ''}
+            </span>
+            <span className="px-2 py-0.5 rounded-md bg-[#2A9D8F]/12 text-[#218175] text-[11px] font-mono font-semibold">
+              {adOverride.provider}
+            </span>
+          </div>
+
+          <div
+            role="group"
+            aria-label="Preview viewport width"
+            className="inline-flex items-center rounded-lg border border-[#264653]/15 bg-white p-0.5"
+          >
+            <button
+              type="button"
+              onClick={() => setViewportMode('desktop')}
+              aria-pressed={viewportMode === 'desktop'}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                viewportMode === 'desktop'
+                  ? 'bg-[#264653] text-white'
+                  : 'text-[#264653]/70 hover:text-[#264653]'
+              }`}
+            >
+              <Monitor className="w-3 h-3" />
+              <span>Desktop</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewportMode('mobile')}
+              aria-pressed={viewportMode === 'mobile'}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                viewportMode === 'mobile'
+                  ? 'bg-[#264653] text-white'
+                  : 'text-[#264653]/70 hover:text-[#264653]'
+              }`}
+            >
+              <Smartphone className="w-3 h-3" />
+              <span>Mobile</span>
+            </button>
+          </div>
         </div>
 
-        <div className="rounded-xl bg-white/75 border border-[#264653]/10 p-2 overflow-x-auto">
+        {/* Sandboxed Execution Container: never displays an unexplained blank white box */}
+        <div
+          className={
+            showFrameVisibly
+              ? `rounded-xl bg-white border border-[#264653]/12 p-2.5 mx-auto transition-all ${
+                  viewportMode === 'mobile' ? 'w-full max-w-[375px]' : 'w-full'
+                }`
+              : 'h-0 overflow-hidden opacity-0 pointer-events-none m-0 p-0 border-0'
+          }
+          aria-hidden={!showFrameVisibly}
+        >
           <SandboxedAdFrame ad={adOverride} testMode onStatusChange={handleStatus} />
         </div>
 
-        {status === 'loading' && (
-          <p className="text-[11px] text-[#264653]/60 px-1">
-            Rendering isolated preview inside sandboxed container...
-          </p>
+        {/* Status-Specific Diagnostics (Strictly Distinguishes All 6 States) */}
+        {isPendingState && (
+          <div
+            role="status"
+            className="rounded-xl bg-[#F4EDE4] border border-[#264653]/15 px-3.5 py-3 flex items-start gap-2.5 text-xs text-[#264653]"
+          >
+            <Loader2 className="w-4 h-4 text-[#2A9D8F] animate-spin shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-bold">
+                {status === 'script_loaded' ? 'Script Loaded' : 'Loading Sandbox Preview'}
+              </p>
+              <p className="text-[#264653]/75">
+                {statusMessage ||
+                  (status === 'script_loaded'
+                    ? 'External ad script loaded; verifying visible creative output...'
+                    : 'Executing submitted snippet inside isolated sandbox without parent DOM or auth access...')}
+              </p>
+            </div>
+          </div>
         )}
 
         {status === 'loaded' && (
-          <p className="text-[11px] text-[#2A9D8F] font-medium px-1">
-            Creative rendered inside sandboxed iframe
-            {hasDest && !ownsClickables
-              ? ' · Clicking banner opens Destination URL in new tab.'
-              : hasDest && ownsClickables
-                ? ' · Snippet already contains links/scripts; original click behavior preserved.'
-                : '.'}
-          </p>
+          <div
+            role="status"
+            className="rounded-xl bg-[#2A9D8F]/10 border border-[#2A9D8F]/30 px-3.5 py-2.5 flex items-start gap-2.5 text-xs text-[#264653]"
+          >
+            <CheckCircle2 className="w-4 h-4 text-[#2A9D8F] shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-bold text-[#218175]">Ad Successfully Rendered</p>
+              <p className="text-[#264653]/80">
+                {statusMessage || 'Visible creative output verified inside sandboxed container.'}
+                {hasDest && !ownsClickables
+                  ? ' Clicking banner opens Destination URL in a new tab.'
+                  : hasDest && ownsClickables
+                    ? ' Snippet already contains links/scripts; original click behavior preserved.'
+                    : ''}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status === 'no_inventory' && (
+          <div
+            role="alert"
+            className="rounded-xl bg-[#E9C46A]/20 border border-[#B0892B]/35 px-3.5 py-3 flex items-start gap-2.5 text-xs text-[#264653]"
+          >
+            <Info className="w-4 h-4 text-[#9A6B13] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold text-[#7A530B]">No Ad Inventory Available</p>
+              <p className="text-[#264653]/85 leading-relaxed">
+                {statusMessage ||
+                  'The advertisement script loaded and ran without errors, but returned no ad inventory or visible creative.'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status === 'script_blocked' && (
+          <div
+            role="alert"
+            className="rounded-xl bg-[#E76F51]/12 border border-[#E76F51]/40 px-3.5 py-3 flex items-start gap-2.5 text-xs text-[#264653]"
+          >
+            <ShieldAlert className="w-4 h-4 text-[#D05A3C] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold text-[#9A3412]">Script Blocked</p>
+              <p className="text-[#264653]/85 leading-relaxed">
+                {statusMessage ||
+                  'External advertisement script or frame was blocked (check ad-blocker extensions, Brave Shields, CSP rules, or script URL).'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status === 'error' && (
+          <div
+            role="alert"
+            className="rounded-xl bg-[#E76F51]/12 border border-[#E76F51]/40 px-3.5 py-3 flex items-start gap-2.5 text-xs text-[#264653]"
+          >
+            <AlertCircle className="w-4 h-4 text-[#D05A3C] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <p className="font-bold text-[#9A3412]">Script Error</p>
+              <p className="text-[#264653]/85 leading-relaxed">
+                {statusMessage ||
+                  'The submitted advertisement script threw a JavaScript error or failed to load its creative asset.'}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {status === 'preview_unsupported' && (
+          <div
+            role="alert"
+            className="rounded-xl bg-[#264653]/7 border border-[#264653]/20 px-3.5 py-3 space-y-2 text-xs text-[#264653]"
+          >
+            <div className="flex items-start gap-2.5">
+              <ShieldAlert className="w-4 h-4 text-[#264653] shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-bold text-[#264653]">Preview Unsupported by Provider</p>
+                <p className="text-[#264653]/80 leading-relaxed">
+                  {statusMessage ||
+                    'External script loaded cleanly, but the provider mounted a cross-origin frame whose creative output cannot be verified or rendered inside an opaque-origin sandboxed preview (strict isolation remains active to protect parent DOM and Firebase credentials).'}
+                </p>
+              </div>
+            </div>
+            <div className="pl-6">
+              <button
+                type="button"
+                onClick={() => setShowRawUnsupportedFrame((v) => !v)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white border border-[#264653]/18 text-[11px] font-semibold text-[#264653] hover:bg-[#F4EDE4]"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>
+                  {showRawUnsupportedFrame
+                    ? 'Hide Raw Sandbox Frame'
+                    : 'Inspect Raw Sandbox Output'}
+                </span>
+              </button>
+            </div>
+          </div>
         )}
 
         {status === 'popunder_ready' && (
-          <p className="text-[11px] text-[#264653]/75 font-medium px-1">
-            Popunder script loaded without errors (popunder creatives do not render a visible banner box).
-          </p>
-        )}
-
-        {(status === 'error' || status === 'empty') && (
           <div
-            role="alert"
-            className="rounded-xl bg-[#E76F51]/10 border border-[#E76F51]/35 px-3 py-2 text-xs text-[#9A3412]"
+            role="status"
+            className="rounded-xl bg-[#264653]/6 border border-[#264653]/15 px-3.5 py-3 flex items-start gap-2.5 text-xs text-[#264653]"
           >
-            <strong>Preview Error:</strong>{' '}
-            {errorMessage ||
-              'The submitted ad script or snippet could not render visible content (check script tags, external URL reachability, or ad-blocker rules).'}
+            <Info className="w-4 h-4 text-[#2A9D8F] shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-bold">Popunder Script Loaded</p>
+              <p className="text-[#264653]/80">
+                {statusMessage ||
+                  'Popunder script executed without errors (popunder creatives trigger on click rather than rendering a visible banner box).'}
+              </p>
+            </div>
           </div>
         )}
       </div>
