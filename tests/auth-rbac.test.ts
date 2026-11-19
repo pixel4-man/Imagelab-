@@ -16,13 +16,18 @@ import {
   ProfileEnsureCoordinator,
 } from '../src/lib/profileSync.ts';
 import {
+  detectAdProvider,
   findDuplicatePlacement,
   formatReadableError,
+  hasOwnInteractiveOrScriptElements,
+  normalizeCreativeMarkup,
   normalizePageRoute,
   normalizeSlotIdentifier,
   validateAdPayload,
   validatePlacementPayload,
+  validateSafeHttpUrl,
 } from '../src/types/ads.ts';
+import { buildSandboxedAdSrcDoc } from '../src/lib/adFrameHtml.ts';
 import {
   callJsonApiWithFallback,
   isJsonContentType,
@@ -454,7 +459,7 @@ test('12. Visual Placement Selector wires data-ad-slot anchors, touch/dblclick o
   );
   assert.match(injectorSource, /createPortal/);
   assert.match(injectorSource, /anchorMissing/);
-  assert.match(injectorSource, /SandboxedAdFrame/);
+  assert.match(injectorSource, /LivePublicAdItem/);
 
   const adSlotSource = fs.readFileSync(
     path.resolve(process.cwd(), 'src/components/AdSlot.tsx'),
@@ -580,28 +585,29 @@ test('15. Prompt Cards Copy Prompt, DM Sans Prompt Details, Search by Prompt, Vi
   );
   assert.match(clientDataSource, /READY_MADE_PROMPTS/);
   assert.match(seededSource, /RAW_READY_MADE_PROMPTS/);
-  assert.match(seededSource, /promptText:/);
+  assert.doesNotMatch(seededSource, /SEEDED_PROMPT_SECRETS|promptText/);
 
   const cardSource = fs.readFileSync(
     path.resolve(process.cwd(), 'src/components/PromptCard.tsx'),
     'utf-8'
   );
-  assert.match(cardSource, /Copy Prompt/);
-  assert.match(cardSource, /copyPrompt\(prompt\.id\)/);
-  assert.match(cardSource, /View Details/);
+  assert.match(cardSource, /aspect-\[9\/16\]/);
+  assert.match(cardSource, /object-cover/);
+  assert.doesNotMatch(cardSource, /Copy Prompt|View Details|prompt\.likes|prompt\.views|toggleLike/);
 
   const exploreSource = fs.readFileSync(
     path.resolve(process.cwd(), 'src/pages/ExplorePage.tsx'),
     'utf-8'
   );
-  assert.match(exploreSource, /\(item\.promptText \|\| ''\)\.toLowerCase\(\)\.includes\(q\)/);
+  assert.doesNotMatch(exploreSource, /promptText/);
+  assert.match(exploreSource, /grid-cols-2/);
 
   const detailsSource = fs.readFileSync(
     path.resolve(process.cwd(), 'src/pages/PromptDetailsPage.tsx'),
     'utf-8'
   );
   assert.match(detailsSource, /Complete AI Generation Prompt/);
-  assert.match(detailsSource, /Copy Prompt/);
+  assert.match(detailsSource, /Copy Full Prompt/);
   assert.match(detailsSource, /copyPrompt\(prompt\.id\)/);
   assert.doesNotMatch(detailsSource, /font-mono/);
 
@@ -1030,4 +1036,264 @@ test('19. Visual placement persistence fixes HTML SPA fallback, enforces dimensi
   assert.match(serverSource, /res\.status\(409\)\.json/);
   assert.match(serverSource, /syncPublicAdSlotAdmin/);
   assert.match(serverSource, /syncPublicAdSlotsForPlacementAdmin/);
+});
+
+test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects provider, secures Destination URL & click wrapping, and collapses empty boxes', () => {
+  // 1. Safe Destination URL validation
+  assert.equal(validateSafeHttpUrl('').valid, true);
+  assert.equal(validateSafeHttpUrl('https://partner.example.com/offer?id=1').valid, true);
+  assert.equal(validateSafeHttpUrl('http://example.com').valid, true);
+  assert.equal(validateSafeHttpUrl('javascript:alert(1)').valid, false);
+  assert.equal(validateSafeHttpUrl('data:text/html,<script>alert(1)</script>').valid, false);
+  assert.equal(validateSafeHttpUrl('https://example.com/bad url').valid, false);
+
+  // 2. Provider auto-detection across networks & custom banners
+  assert.equal(
+    detectAdProvider(`<script>atOptions = {'key':'abc','format':'iframe'};</script>`),
+    'Adsterra'
+  );
+  assert.equal(
+    detectAdProvider(`<script src="//www.highperformanceformat.com/123/invoke.js"></script>`),
+    'Adsterra'
+  );
+  assert.equal(
+    detectAdProvider(`<ins class="adsbygoogle"></ins><script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>`),
+    'Google AdSense'
+  );
+  assert.equal(
+    detectAdProvider(`<script src="https://alwingulla.com/88/tag.min.js"></script>`),
+    'Monetag'
+  );
+  assert.equal(detectAdProvider(`<script src="https://cdn.example.net/ads.js"></script>`), 'Generic Ad Network');
+  assert.equal(detectAdProvider('https://cdn.example.com/banner-728x90.webp'), 'Custom Banner');
+  assert.equal(detectAdProvider(`<img src="https://cdn.example.com/b.png" />`), 'Custom Banner');
+  assert.equal(detectAdProvider(`<div>Sponsored Studio Offer</div>`), 'Custom Ad');
+
+  // 3. validateAdPayload succeeds WITHOUT name or provider inputs and derives them cleanly
+  const adsterraCheck = validateAdPayload(
+    {
+      adType: 'banner',
+      placementId: 'plc_hero_1',
+      width: '728px',
+      height: '90px',
+      status: 'active',
+      priority: 5,
+      scriptCode: `<script>atOptions = {'key':'abc'};</script><script src="//www.highperformanceformat.com/abc/invoke.js"></script>`,
+    },
+    { placementName: 'Homepage Below Hero' }
+  );
+  assert.equal(adsterraCheck.valid, true);
+  assert.equal(adsterraCheck.sanitized?.provider, 'Adsterra');
+  assert.equal(adsterraCheck.sanitized?.name, 'Adsterra · Homepage Below Hero');
+  assert.equal(adsterraCheck.sanitized?.destinationUrl, '');
+
+  const customBannerCheck = validateAdPayload(
+    {
+      adType: 'banner',
+      placementId: 'plc_footer_1',
+      width: '300px',
+      height: '250px',
+      status: 'active',
+      priority: 12,
+      destinationUrl: 'https://sponsor.example.com/deals',
+      scriptCode: 'https://cdn.example.com/ad-300x250.png',
+    },
+    { placementName: 'Footer Banner' }
+  );
+  assert.equal(customBannerCheck.valid, true);
+  assert.equal(customBannerCheck.sanitized?.provider, 'Custom Banner');
+  assert.equal(customBannerCheck.sanitized?.name, 'Custom Banner · Footer Banner');
+  assert.equal(customBannerCheck.sanitized?.destinationUrl, 'https://sponsor.example.com/deals');
+
+  const unsafeDestCheck = validateAdPayload({
+    adType: 'banner',
+    placementId: 'plc_footer_1',
+    width: '300px',
+    height: '250px',
+    status: 'active',
+    priority: 10,
+    destinationUrl: 'javascript:alert(document.cookie)',
+    scriptCode: '<img src="https://cdn.example.com/ad.png" />',
+  });
+  assert.equal(unsafeDestCheck.valid, false);
+
+  // 4. Click behavior & sandbox isolation in buildSandboxedAdSrcDoc
+  assert.equal(hasOwnInteractiveOrScriptElements('<img src="https://cdn.example.com/ad.png" />'), false);
+  assert.equal(
+    hasOwnInteractiveOrScriptElements('<a href="https://native.example.com"><img src="https://cdn.example.com/ad.png" /></a>'),
+    true
+  );
+  assert.equal(
+    hasOwnInteractiveOrScriptElements('<script src="//www.highperformanceformat.com/x/invoke.js"></script>'),
+    true
+  );
+
+  // Direct image URL + destinationUrl -> normalized to <img> and wrapped in target="_blank" link
+  const directBannerHtml = buildSandboxedAdSrcDoc({
+    id: 'ad_custom_1',
+    name: 'Custom Banner',
+    provider: 'Custom Banner',
+    adType: 'banner',
+    scriptCode: 'https://cdn.example.com/promo.webp',
+    destinationUrl: 'https://landing.example.com/?ref=imagelab',
+    placementId: 'plc_1',
+    width: '728px',
+    height: '90px',
+    status: 'active',
+    priority: 1,
+    createdAt: '',
+    updatedAt: '',
+  });
+  assert.match(directBannerHtml, /<base target="_blank" rel="noopener noreferrer" \/>/);
+  assert.match(
+    directBannerHtml,
+    /<a class="imagelab-ad-link" href="https:\/\/landing\.example\.com\/\?ref=imagelab" target="_blank" rel="noopener noreferrer"><img src="https:\/\/cdn\.example\.com\/promo\.webp"/
+  );
+
+  // Custom HTML already having <a> + destinationUrl -> preserves original anchor without double-wrapping
+  const existingLinkHtml = buildSandboxedAdSrcDoc({
+    id: 'ad_html_1',
+    name: 'Custom Ad',
+    provider: 'Custom Ad',
+    adType: 'custom_html_js',
+    scriptCode: '<a href="https://original.example.com"><span>Click Original</span></a>',
+    destinationUrl: 'https://override-should-not-wrap.example.com',
+    placementId: 'plc_1',
+    width: 'auto',
+    height: 'auto',
+    status: 'active',
+    priority: 1,
+    createdAt: '',
+    updatedAt: '',
+  });
+  assert.doesNotMatch(existingLinkHtml, /class="imagelab-ad-link"/);
+  assert.doesNotMatch(existingLinkHtml, /override-should-not-wrap/);
+  assert.match(existingLinkHtml, /href="https:\/\/original\.example\.com"/);
+
+  // Adsterra script + destinationUrl -> preserves script untouched without wrapping
+  const adsterraHtml = buildSandboxedAdSrcDoc({
+    id: 'ad_adsterra_1',
+    name: 'Adsterra Banner',
+    provider: 'Adsterra',
+    adType: 'banner',
+    scriptCode: `<script type="text/javascript">atOptions={'key':'k1'};</script><script src="//www.highperformanceformat.com/k1/invoke.js"></script>`,
+    destinationUrl: 'https://ignored-when-script.example.com',
+    placementId: 'plc_1',
+    width: '300px',
+    height: '250px',
+    status: 'active',
+    priority: 1,
+    createdAt: '',
+    updatedAt: '',
+  });
+  assert.doesNotMatch(adsterraHtml, /class="imagelab-ad-link"/);
+  assert.doesNotMatch(adsterraHtml, /ignored-when-script/);
+  assert.match(adsterraHtml, /highperformanceformat\.com\/k1\/invoke\.js/);
+
+  // normalizeCreativeMarkup leaves HTML untouched and converts standalone image URL
+  assert.match(normalizeCreativeMarkup('https://cdn.example.com/a.jpg'), /^<img src="https:\/\/cdn\.example\.com\/a\.jpg"/);
+  assert.equal(normalizeCreativeMarkup('<div>Hi</div>'), '<div>Hi</div>');
+
+  // 5. Simplified Add/Edit modal removes Name & Provider inputs while keeping Destination URL & Live Preview
+  const workspaceSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/AdsManagerWorkspace.tsx'),
+    'utf-8'
+  );
+  const modalSlice = workspaceSource.slice(workspaceSource.indexOf('{/* Create / Edit Advertisement Modal */}'));
+  assert.doesNotMatch(modalSlice, /Advertisement Name/);
+  assert.doesNotMatch(modalSlice, /Ad Provider/);
+  assert.match(modalSlice, /Destination URL/);
+  assert.match(modalSlice, /Preview Advertisement/);
+  assert.match(modalSlice, /Selected Website Placement/);
+
+  // 6. Public empty-ad collapsing & VisualPlacementOverlay preview + return route preservation
+  const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
+  assert.match(adSlotSource, /LivePublicAdItem/);
+  assert.match(adSlotSource, /if \(status === 'empty' \|\| status === 'error'\) \{\s*return null;\s*\}/);
+  assert.match(adSlotSource, /sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"/);
+  assert.doesNotMatch(adSlotSource, /allow-same-origin/);
+
+  const injectorSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VisualAdInjector.tsx'),
+    'utf-8'
+  );
+  assert.match(injectorSource, /PlacementAdPortalGroup/);
+  assert.match(injectorSource, /hasAnyVisible/);
+  assert.match(injectorSource, /h-0 overflow-hidden m-0 p-0/);
+
+  const overlaySource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/VisualPlacementOverlay.tsx'),
+    'utf-8'
+  );
+  assert.match(overlaySource, /Preview Slot Area on Page|Preview Your Draft Ad Inside This Area/);
+  assert.match(overlaySource, /returnTo/);
+});
+
+test('21. Two-column 9:16 Instagram-style gallery, image-only tiles, authenticated Copy Full Prompt, and strict prompt-secret isolation hold', async () => {
+  // 1. PromptCard & SkeletonCard strictly enforce 9:16 portrait cover with zero text/metadata below
+  const cardSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/PromptCard.tsx'), 'utf-8');
+  assert.match(cardSource, /aspect-\[9\/16\]/);
+  assert.match(cardSource, /object-cover/);
+  assert.doesNotMatch(cardSource, /<h[1-6]|<p\b|<button\b|likes|views|copies|promptText/);
+
+  const skeletonSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/FeedbackStates.tsx'), 'utf-8');
+  assert.match(skeletonSource, /aspect-\[9\/16\]/);
+  assert.doesNotMatch(skeletonSource, /aspect-\[4\/3\]|aspect-square/);
+
+  // 2. Public galleries consistently use 2-column grid layout & strict 9:16 previews while preserving ad slots
+  for (const relPath of [
+    'src/pages/HomePage.tsx',
+    'src/pages/ExplorePage.tsx',
+    'src/pages/TrendingPage.tsx',
+    'src/pages/SavedPromptsPage.tsx',
+    'src/pages/ProfilePage.tsx',
+    'src/pages/PromptDetailsPage.tsx',
+  ]) {
+    const src = fs.readFileSync(path.resolve(process.cwd(), relPath), 'utf-8');
+    assert.match(src, /grid-cols-2/, `${relPath} must use 2-column gallery grid`);
+  }
+
+  const homeSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/HomePage.tsx'), 'utf-8');
+  assert.match(homeSource, /data-ad-slot="homepage_trending"/);
+  assert.match(homeSource, /data-ad-slot="homepage_gallery"/);
+  assert.doesNotMatch(homeSource, /aspect-\[4\/3\]|aspect-\[16\/10\]/);
+
+  const trendingSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/TrendingPage.tsx'), 'utf-8');
+  assert.match(trendingSource, /aspect-\[9\/16\]/);
+  assert.doesNotMatch(trendingSource, /aspect-\[16\/10\]/);
+
+  // 3. PromptDetailsPage displays 9:16 portrait image, single Copy Full Prompt button, redirect for guests, & confirmation
+  const detailsSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/PromptDetailsPage.tsx'), 'utf-8');
+  assert.match(detailsSource, /aspect-\[9\/16\]/);
+  const copyMatches = detailsSource.match(/Copy Full Prompt/g) || [];
+  assert.ok(copyMatches.length >= 1);
+  assert.doesNotMatch(detailsSource, />\s*Copy Prompt\s*</);
+  assert.match(detailsSource, /\/signup\?redirect=/);
+  assert.match(detailsSource, /imagelab_post_auth_redirect/);
+  assert.match(detailsSource, /Prompt copied successfully/);
+
+  // 4. Secret prompts are completely excluded from client-bundled data and public Firestore writes
+  const { SEEDED_PROMPT_SECRETS } = await import('../src/server/seededPromptSecrets.ts');
+  const seededClientSource = fs.readFileSync(path.resolve(process.cwd(), 'src/server/seededPromptsData.ts'), 'utf-8');
+  for (const secretValue of Object.values(SEEDED_PROMPT_SECRETS)) {
+    const snippet = secretValue.slice(0, 32);
+    assert.equal(seededClientSource.includes(snippet), false, 'Client seeded data must never contain secret prompt strings');
+  }
+
+  const publishSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/PublishPage.tsx'), 'utf-8');
+  const publicBatchSlice = publishSource.slice(
+    publishSource.indexOf("batch.set(doc(db, 'prompts'"),
+    publishSource.indexOf("batch.set(doc(db, 'promptSecrets'")
+  );
+  assert.doesNotMatch(publicBatchSlice, /promptText/);
+
+  const serverSource = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
+  const sanitizeSlice = serverSource.slice(
+    serverSource.indexOf('const sanitizePublicPrompt'),
+    serverSource.indexOf('const resolveCanonicalSiteOrigin')
+  );
+  assert.doesNotMatch(sanitizeSlice, /promptText/);
+
+  const rulesSource = fs.readFileSync(path.resolve(process.cwd(), 'firestore.rules'), 'utf-8');
+  assert.match(rulesSource, /!\('promptText' in incoming\(\)\)/);
 });

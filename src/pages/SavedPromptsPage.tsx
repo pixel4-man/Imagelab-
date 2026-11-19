@@ -57,7 +57,7 @@ export function SavedPromptsPage() {
           <section
             data-ad-slot="saved_prompts_grid"
             data-ad-label="Saved Prompts Grid"
-            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"
+            className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6"
           >
             {savedPrompts.map((prompt) => (
               <PromptCard key={prompt.id} prompt={prompt} />

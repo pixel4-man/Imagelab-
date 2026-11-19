@@ -156,7 +156,6 @@ export function PublishPage() {
         batch.set(doc(db, 'prompts', created.id), {
           id: created.id,
           title: cleanTitle,
-          promptText: cleanPrompt,
           imageUrl: resolvedImage,
           aspectRatio: detectedAspectRatio,
           authorUid: firebaseUser.uid,

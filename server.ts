@@ -18,11 +18,14 @@ import {
 import {
   type AdType,
   BUILT_IN_AD_TYPES,
+  deriveInternalAdName,
+  detectAdProvider,
   findDuplicatePlacement,
   type VisualPlacementRecord,
   normalizePageRoute,
   validateAdPayload,
   validatePlacementPayload,
+  validateSafeHttpUrl,
 } from './src/types/ads.ts';
 import { SEEDED_PROMPT_SECRETS } from './src/server/seededPromptSecrets.ts';
 import { READY_MADE_PROMPTS } from './src/server/seededPromptsData.ts';
@@ -265,11 +268,11 @@ async function syncPromptSecretsToPrompts(): Promise<void> {
     for (const seed of READY_MADE_PROMPTS) {
       if (existingPromptIds.has(seed.id) || deletedPromptIds.has(seed.id)) continue;
       const seedDate = new Date(`${seed.createdAt}T12:00:00.000Z`);
+      const seedSecretText = SEEDED_PROMPT_SECRETS[seed.id] || '';
       const batch = adminDb.batch();
       batch.set(adminDb.collection('prompts').doc(seed.id), {
         id: seed.id,
         title: seed.title,
-        promptText: seed.promptText || '',
         imageUrl: seed.imageUrl,
         aspectRatio: seed.aspectRatio,
         authorUid: 'imagelab_official',
@@ -283,10 +286,10 @@ async function syncPromptSecretsToPrompts(): Promise<void> {
         createdAt: seedDate,
         updatedAt: seedDate,
       });
-      if (seed.promptText) {
+      if (seedSecretText) {
         batch.set(adminDb.collection('promptSecrets').doc(seed.id), {
           id: seed.id,
-          promptText: seed.promptText,
+          promptText: seedSecretText,
           authorUid: 'imagelab_official',
           createdAt: seedDate,
           updatedAt: seedDate,
@@ -302,11 +305,7 @@ async function syncPromptSecretsToPrompts(): Promise<void> {
         typeof data.promptText === 'string' ? data.promptText.trim() : '';
       const secretText = secretMap.get(docSnap.id) || '';
 
-      if (!currentPromptText && secretText) {
-        await docSnap.ref.update({
-          promptText: secretText,
-        });
-      } else if (currentPromptText && !secretText) {
+      if (currentPromptText && !secretText) {
         await adminDb.collection('promptSecrets').doc(docSnap.id).set({
           id: docSnap.id,
           promptText: currentPromptText,
@@ -316,6 +315,23 @@ async function syncPromptSecretsToPrompts(): Promise<void> {
               : 'legacy',
           createdAt: data.createdAt || FieldValue.serverTimestamp(),
           updatedAt: FieldValue.serverTimestamp(),
+        });
+      } else if (!secretText && SEEDED_PROMPT_SECRETS[docSnap.id]) {
+        await adminDb.collection('promptSecrets').doc(docSnap.id).set({
+          id: docSnap.id,
+          promptText: SEEDED_PROMPT_SECRETS[docSnap.id],
+          authorUid:
+            typeof data.authorUid === 'string' && data.authorUid
+              ? data.authorUid
+              : 'imagelab_official',
+          createdAt: data.createdAt || FieldValue.serverTimestamp(),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+
+      if ('promptText' in data) {
+        await docSnap.ref.update({
+          promptText: FieldValue.delete(),
         });
       }
     }
@@ -1030,6 +1046,25 @@ async function startServer() {
     const rawHeight = typeof adData.height === 'string' && adData.height.trim() ? adData.height.trim() : 'auto';
     const effectiveWidth = rawWidth !== 'auto' ? rawWidth : placement.width || 'auto';
     const effectiveHeight = rawHeight !== 'auto' ? rawHeight : placement.height || 'auto';
+    const safeDest = validateSafeHttpUrl(
+      typeof adData.destinationUrl === 'string' ? adData.destinationUrl : ''
+    ).sanitized;
+    const resolvedAdType: AdType = BUILT_IN_AD_TYPES.includes(adData.adType as AdType)
+      ? (adData.adType as AdType)
+      : 'responsive_banner';
+    const resolvedProvider =
+      typeof adData.provider === 'string' && adData.provider.trim().length >= 2
+        ? adData.provider.trim().slice(0, 80)
+        : detectAdProvider(scriptCode);
+    const resolvedName =
+      typeof adData.name === 'string' && adData.name.trim().length >= 2
+        ? adData.name.trim().slice(0, 120)
+        : deriveInternalAdName({
+            adType: resolvedAdType,
+            provider: resolvedProvider,
+            placementName: placement.name || placement.id,
+            scriptCode,
+          });
 
     await publicRef.set({
       id: adId,
@@ -1041,12 +1076,11 @@ async function startServer() {
       selector: placement.selector,
       position: placement.position,
       placementPriority: placement.priority,
-      name: String(adData.name || ''),
-      provider: String(adData.provider || ''),
-      adType: BUILT_IN_AD_TYPES.includes(adData.adType as AdType)
-        ? String(adData.adType)
-        : 'responsive_banner',
+      name: resolvedName,
+      provider: resolvedProvider,
+      adType: resolvedAdType,
       scriptCode,
+      destinationUrl: safeDest,
       width: effectiveWidth,
       height: effectiveHeight,
       priority: typeof adData.priority === 'number' && Number.isFinite(adData.priority) ? adData.priority : 10,
@@ -1099,12 +1133,16 @@ async function startServer() {
           const matchedPlacement = activePlacementMap.get(placementId);
           const rawWidth = String(d.width || 'auto');
           const rawHeight = String(d.height || 'auto');
+          const scriptCode = String(d.scriptCode || '');
           return {
             id: docSnap.id,
             name: String(d.name || ''),
-            provider: String(d.provider || ''),
+            provider: String(d.provider || detectAdProvider(scriptCode)),
             adType: String(d.adType || matchedPlacement?.adType || 'banner'),
-            scriptCode: String(d.scriptCode || ''),
+            scriptCode,
+            destinationUrl: validateSafeHttpUrl(
+              typeof d.destinationUrl === 'string' ? d.destinationUrl : ''
+            ).sanitized,
             placementId,
             placementName: matchedPlacement?.name || String(d.placementName || ''),
             width: rawWidth !== 'auto' ? rawWidth : matchedPlacement?.width || 'auto',
@@ -1364,12 +1402,16 @@ async function startServer() {
           .map((docSnap) => {
             const d = docSnap.data();
             const placementId = String(d.placementId || '');
+            const scriptCode = String(d.scriptCode || '');
             return {
               id: docSnap.id,
               name: String(d.name || ''),
-              provider: String(d.provider || ''),
+              provider: String(d.provider || detectAdProvider(scriptCode)),
               adType: String(d.adType || 'banner'),
-              scriptCode: String(d.scriptCode || ''),
+              scriptCode,
+              destinationUrl: validateSafeHttpUrl(
+                typeof d.destinationUrl === 'string' ? d.destinationUrl : ''
+              ).sanitized,
               placementId,
               placementName:
                 placementNameMap.get(placementId) ||
@@ -1400,16 +1442,16 @@ async function startServer() {
     requireAuthToken,
     adminGuard,
     async (req: AuthenticatedRequest, res: Response) => {
-      const check = validateAdPayload(req.body || {});
-      if (!check.valid || !check.sanitized) {
-        res.status(400).json({ error: check.error || 'Invalid advertisement payload.' });
+      const preCheck = validateAdPayload(req.body || {});
+      if (!preCheck.valid || !preCheck.sanitized) {
+        res.status(400).json({ error: preCheck.error || 'Invalid advertisement payload.' });
         return;
       }
 
       try {
         const placementSnap = await adminDb!
           .collection('adPlacements')
-          .doc(check.sanitized.placementId)
+          .doc(preCheck.sanitized.placementId)
           .get();
         if (!placementSnap.exists) {
           res.status(400).json({
@@ -1417,12 +1459,14 @@ async function startServer() {
           });
           return;
         }
-        const placementName = String(placementSnap.data()?.name || check.sanitized.placementId);
+        const placementName = String(placementSnap.data()?.name || preCheck.sanitized.placementId);
+        const check = validateAdPayload(req.body || {}, { placementName });
+        const sanitized = check.sanitized || preCheck.sanitized;
 
         const adId = `ad_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         const record = {
           id: adId,
-          ...check.sanitized,
+          ...sanitized,
           placementName,
           createdAt: FieldValue.serverTimestamp(),
           updatedAt: FieldValue.serverTimestamp(),
@@ -1435,7 +1479,7 @@ async function startServer() {
         const d = saved.data() || {};
         res.status(201).json({
           ad: {
-            ...check.sanitized,
+            ...sanitized,
             placementName,
             id: adId,
             createdAt: serializeTs(d.createdAt),
@@ -1471,11 +1515,30 @@ async function startServer() {
           return;
         }
         const existingData = snap.data() || {};
-        const merged = {
-          name: req.body?.name ?? existingData.name,
-          provider: req.body?.provider ?? existingData.provider,
+        const scriptProvided = typeof req.body?.scriptCode === 'string';
+        const scriptChanged =
+          scriptProvided &&
+          req.body.scriptCode.trim() !== String(existingData.scriptCode || '').trim();
+
+        const mergedInput = {
+          name:
+            req.body?.name !== undefined
+              ? req.body.name
+              : scriptChanged
+                ? ''
+                : existingData.name,
+          provider:
+            req.body?.provider !== undefined
+              ? req.body.provider
+              : scriptChanged
+                ? ''
+                : existingData.provider,
           adType: req.body?.adType ?? existingData.adType,
           scriptCode: req.body?.scriptCode ?? existingData.scriptCode,
+          destinationUrl:
+            req.body?.destinationUrl !== undefined
+              ? req.body.destinationUrl
+              : existingData.destinationUrl,
           placementId: req.body?.placementId ?? existingData.placementId,
           width: req.body?.width ?? existingData.width,
           height: req.body?.height ?? existingData.height,
@@ -1483,24 +1546,26 @@ async function startServer() {
           priority: req.body?.priority ?? existingData.priority,
         };
 
-        const check = validateAdPayload(merged);
-        if (!check.valid || !check.sanitized) {
-          res.status(400).json({ error: check.error || 'Invalid advertisement update.' });
+        const preCheck = validateAdPayload(mergedInput);
+        if (!preCheck.valid || !preCheck.sanitized) {
+          res.status(400).json({ error: preCheck.error || 'Invalid advertisement update.' });
           return;
         }
 
         const placementSnap = await adminDb!
           .collection('adPlacements')
-          .doc(check.sanitized.placementId)
+          .doc(preCheck.sanitized.placementId)
           .get();
         if (!placementSnap.exists) {
           res.status(400).json({ error: 'Target placement does not exist.' });
           return;
         }
-        const placementName = String(placementSnap.data()?.name || check.sanitized.placementId);
+        const placementName = String(placementSnap.data()?.name || preCheck.sanitized.placementId);
+        const check = validateAdPayload(mergedInput, { placementName });
+        const sanitized = check.sanitized || preCheck.sanitized;
 
         await ref.update({
-          ...check.sanitized,
+          ...sanitized,
           placementName,
           updatedAt: FieldValue.serverTimestamp(),
           updatedByUid: req.authUser!.uid,
@@ -1511,7 +1576,7 @@ async function startServer() {
         const ud = updatedSnap.data() || {};
         res.json({
           ad: {
-            ...check.sanitized,
+            ...sanitized,
             placementName,
             id: adId,
             createdAt: serializeTs(ud.createdAt),
@@ -1572,16 +1637,10 @@ async function startServer() {
 
   const sanitizePublicPrompt = (
     id: string,
-    d: Record<string, unknown>,
-    resolvedSecretText?: string
+    d: Record<string, unknown>
   ) => ({
     id,
     title: String(d.title || 'Untitled Artwork'),
-    promptText:
-      (typeof d.promptText === 'string' && d.promptText.trim()) ||
-      (typeof resolvedSecretText === 'string' && resolvedSecretText.trim()) ||
-      SEEDED_PROMPT_SECRETS[id] ||
-      '',
     imageUrl: String(
       d.imageUrl || '/src/assets/images/art_digital_dreamscape_1794836302512.jpg'
     ),
@@ -1710,7 +1769,7 @@ async function startServer() {
     );
   });
 
-  // Public Prompt Gallery (includes ONLY status == 'approved' prompts)
+  // Public Prompt Gallery (includes ONLY status == 'approved' prompts; NEVER exposes protected promptText)
   app.get('/api/prompts/public', async (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
     if (!adminDb || !hasAdminCredentials) {
@@ -1718,21 +1777,12 @@ async function startServer() {
       return;
     }
     try {
-      const [snap, secretsSnap] = await Promise.all([
-        adminDb.collection('prompts').where('status', '==', 'approved').get(),
-        adminDb.collection('promptSecrets').get(),
-      ]);
-      const secretMap = new Map<string, string>();
-      for (const sDoc of secretsSnap.docs) {
-        const txt = sDoc.data()?.promptText;
-        if (typeof txt === 'string' && txt.trim()) {
-          secretMap.set(sDoc.id, txt.trim());
-        }
-      }
+      const snap = await adminDb
+        .collection('prompts')
+        .where('status', '==', 'approved')
+        .get();
       const prompts = snap.docs
-        .map((docSnap) =>
-          sanitizePublicPrompt(docSnap.id, docSnap.data() || {}, secretMap.get(docSnap.id))
-        )
+        .map((docSnap) => sanitizePublicPrompt(docSnap.id, docSnap.data() || {}))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       res.json({ prompts, seeded: true });
     } catch {
@@ -1740,7 +1790,7 @@ async function startServer() {
     }
   });
 
-  // Public Single Prompt Details (strictly rejects unpublished or deleted prompts)
+  // Public Single Prompt Details (strictly rejects unpublished/deleted prompts; NEVER exposes protected promptText)
   app.get('/api/prompts/public/:promptId', async (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
     const promptId = String(req.params.promptId || '').trim();
@@ -1753,10 +1803,7 @@ async function startServer() {
       return;
     }
     try {
-      const [snap, secretSnap] = await Promise.all([
-        adminDb.collection('prompts').doc(promptId).get(),
-        adminDb.collection('promptSecrets').doc(promptId).get(),
-      ]);
+      const snap = await adminDb.collection('prompts').doc(promptId).get();
       if (!snap.exists) {
         res.status(404).json({ error: 'Prompt not found.' });
         return;
@@ -1766,17 +1813,13 @@ async function startServer() {
         res.status(404).json({ error: 'Prompt not found.' });
         return;
       }
-      const secretText =
-        secretSnap.exists && typeof secretSnap.data()?.promptText === 'string'
-          ? secretSnap.data()!.promptText
-          : undefined;
-      res.json({ prompt: sanitizePublicPrompt(promptId, d, secretText) });
+      res.json({ prompt: sanitizePublicPrompt(promptId, d) });
     } catch {
       res.status(500).json({ error: 'Unable to load prompt details.' });
     }
   });
 
-  // Authenticated Single Prompt Lookup (owner, Admin, or Super Admin can inspect even if unpublished)
+  // Authenticated Single Prompt Lookup (owner, Admin, or Super Admin can inspect/edit even if unpublished)
   app.get(
     '/api/prompts/:promptId/manage',
     requireAuthToken,
@@ -1802,11 +1845,14 @@ async function startServer() {
           return;
         }
         const userData = userSnap.exists ? userSnap.data() || {} : {};
+        if (userData.accountStatus === 'suspended') {
+          res.status(403).json({ error: 'This account has been suspended.' });
+          return;
+        }
         const actorRole = (userData.role as UserRole) || 'contributor';
         const isPrivilegedAdmin =
           (actorRole === 'admin' || actorRole === 'super_admin') &&
-          req.authUser!.email_verified === true &&
-          userData.accountStatus !== 'suspended';
+          req.authUser!.email_verified === true;
         const d = promptSnap.data() || {};
         const isOwner = d.authorUid === req.authUser!.uid;
         if (d.status !== 'approved' && !isPrivilegedAdmin && !isOwner) {
@@ -1814,12 +1860,16 @@ async function startServer() {
           return;
         }
         const secretText =
-          secretSnap.exists && typeof secretSnap.data()?.promptText === 'string'
+          (secretSnap.exists && typeof secretSnap.data()?.promptText === 'string'
             ? secretSnap.data()!.promptText
-            : undefined;
+            : '') ||
+          (typeof d.promptText === 'string' ? d.promptText : '') ||
+          SEEDED_PROMPT_SECRETS[promptId] ||
+          '';
         res.json({
           prompt: {
-            ...sanitizePublicPrompt(promptId, d, secretText),
+            ...sanitizePublicPrompt(promptId, d),
+            ...(isPrivilegedAdmin || isOwner ? { promptText: secretText } : {}),
             status: d.status || 'approved',
           },
         });
@@ -1916,8 +1966,8 @@ async function startServer() {
           status: nextStatus,
           updatedAt: FieldValue.serverTimestamp(),
         };
-        if (nextPromptText) {
-          updates.promptText = nextPromptText;
+        if ('promptText' in existing) {
+          updates.promptText = FieldValue.delete();
         }
         if (nextAspect) {
           updates.aspectRatio = nextAspect;
@@ -2228,7 +2278,6 @@ async function startServer() {
         const publicMetadata = {
           id: promptId,
           title,
-          promptText,
           imageUrl,
           aspectRatio,
           authorUid: req.authUser!.uid,
@@ -2331,8 +2380,8 @@ async function startServer() {
           status: nextStatus,
           updatedAt: FieldValue.serverTimestamp(),
         };
-        if (nextPromptText) {
-          updates.promptText = nextPromptText;
+        if ('promptText' in existing) {
+          updates.promptText = FieldValue.delete();
         }
         if (nextAspect) {
           updates.aspectRatio = nextAspect;

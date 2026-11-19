@@ -35,6 +35,10 @@ service cloud.firestore {
       return name is string && name.size() >= 3 && name.size() <= 30 && name.matches('^[a-z0-9_]+$');
     }
 
+    function isValidOptionalDestinationUrl(url) {
+      return url is string && url.size() <= 2000 && (url == '' || url.matches('^https?://.+'));
+    }
+
     function hasUserProfile() {
       return exists(/databases/$(database)/documents/users/$(request.auth.uid));
     }
@@ -106,7 +110,7 @@ service cloud.firestore {
         && data.createdAt == request.time;
     }
 
-    // Validation blueprint: PromptDocument (promptText now lives in /promptSecrets; kept optional during legacy transition)
+    // Validation blueprint: PromptDocument (protected promptText strictly lives in /promptSecrets)
     function isValidPromptData(data, promptId) {
       return data.keys().hasAll([
           'id',
@@ -278,6 +282,7 @@ service cloud.firestore {
           'provider',
           'adType',
           'scriptCode',
+          'destinationUrl',
           'placementId',
           'placementName',
           'placement',
@@ -295,6 +300,7 @@ service cloud.firestore {
         && data.provider is string && data.provider.size() >= 2 && data.provider.size() <= 80
         && data.adType in ['banner', 'responsive_banner', 'native_ad', 'popunder', 'custom_html_js', 'other']
         && data.scriptCode is string && data.scriptCode.size() >= 5 && data.scriptCode.size() <= 50000
+        && (!('destinationUrl' in data) || isValidOptionalDestinationUrl(data.destinationUrl))
         && isValidId(data.placementId)
         && (!('placementName' in data) || (data.placementName is string && data.placementName.size() <= 120))
         && (!('placement' in data) || (data.placement is string && data.placement.size() <= 60))
@@ -344,6 +350,7 @@ service cloud.firestore {
           'provider',
           'adType',
           'scriptCode',
+          'destinationUrl',
           'width',
           'height',
           'priority',
@@ -363,6 +370,7 @@ service cloud.firestore {
         && data.provider is string && data.provider.size() >= 2 && data.provider.size() <= 80
         && data.adType in ['banner', 'responsive_banner', 'native_ad', 'popunder', 'custom_html_js', 'other']
         && data.scriptCode is string && data.scriptCode.size() >= 5 && data.scriptCode.size() <= 50000
+        && (!('destinationUrl' in data) || isValidOptionalDestinationUrl(data.destinationUrl))
         && data.width is string && data.width.size() >= 1 && data.width.size() <= 20
         && data.height is string && data.height.size() >= 1 && data.height.size() <= 20
         && data.priority is int && data.priority >= 1 && data.priority <= 999
@@ -451,7 +459,7 @@ service cloud.firestore {
       );
     }
 
-    // 3. Prompts collection (approved prompts readable publicly; pending/rejected/draft restricted to author or Admin)
+    // 3. Prompts collection (approved artwork metadata readable publicly; protected promptText NEVER stored/written on public create/update)
     match /prompts/{promptId} {
       allow get: if isValidId(promptId) && (
         existing().status == 'approved'
@@ -462,6 +470,7 @@ service cloud.firestore {
 
       allow create: if isSignedIn()
         && isValidId(promptId)
+        && !('promptText' in incoming())
         && isValidPromptData(incoming(), promptId)
         && incoming().authorUid == request.auth.uid
         && incoming().createdAt == request.time
@@ -492,7 +501,6 @@ service cloud.firestore {
               'title',
               'shortDescription',
               'fullDescription',
-              'promptText',
               'negativePrompt',
               'category',
               'imageUrl',
@@ -511,7 +519,6 @@ service cloud.firestore {
               'title',
               'shortDescription',
               'fullDescription',
-              'promptText',
               'negativePrompt',
               'category',
               'imageUrl',
@@ -645,6 +652,7 @@ service cloud.firestore {
           'provider',
           'adType',
           'scriptCode',
+          'destinationUrl',
           'placementId',
           'placementName',
           'placement',
@@ -687,6 +695,7 @@ service cloud.firestore {
           'provider',
           'adType',
           'scriptCode',
+          'destinationUrl',
           'width',
           'height',
           'priority',

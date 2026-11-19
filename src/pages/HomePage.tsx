@@ -24,9 +24,12 @@ export function HomePage() {
     return () => window.clearInterval(interval);
   }, [heroArtworks.length]);
 
-  const trendingToday = prompts
-    .filter((p) => p.trendingCollections.includes('today'))
-    .slice(0, 3);
+  const trendingToday = (() => {
+    const todayMatches = prompts.filter((p) => p.trendingCollections.includes('today'));
+    if (todayMatches.length >= 4) return todayMatches.slice(0, 4);
+    const seen = new Set(todayMatches.map((p) => p.id));
+    return [...todayMatches, ...prompts.filter((p) => !seen.has(p.id))].slice(0, 4);
+  })();
 
   const curatedRecent = prompts.slice(0, 6);
 
@@ -111,12 +114,12 @@ export function HomePage() {
               </div>
             </div>
 
-            {/* Right Interactive Artwork Spotlight Card (Zero public prompt preview or copy button) */}
-            <div className="lg:col-span-6 flex flex-col">
-              <div className="relative flex-1 rounded-2xl overflow-hidden bg-[#FAF7F2] border border-[#264653]/12 shadow-[0_20px_50px_-15px_rgba(38,70,83,0.22)] flex flex-col">
+            {/* Right Interactive 9:16 Portrait Spotlight Card (Zero public prompt preview or copy button) */}
+            <div className="lg:col-span-6 flex flex-col items-center lg:items-end justify-center">
+              <div className="relative w-full max-w-[340px] sm:max-w-[360px] rounded-2xl overflow-hidden bg-[#FAF7F2] border border-[#264653]/12 shadow-[0_20px_50px_-15px_rgba(38,70,83,0.22)] flex flex-col">
                 <Link
                   to={`/prompt/${activeHero.id}`}
-                  className="relative block aspect-[16/10] lg:aspect-auto lg:flex-1 min-h-[280px] overflow-hidden bg-[#E8DEC8]"
+                  className="relative block w-full aspect-[9/16] overflow-hidden bg-[#E8DEC8]"
                 >
                   <AnimatePresence mode="wait">
                     <motion.div
@@ -139,12 +142,12 @@ export function HomePage() {
                     className="absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-[#264653]/85 via-[#264653]/35 to-transparent"
                     aria-hidden="true"
                   />
-                  <div className="absolute bottom-4 left-5 right-5 flex items-end justify-between gap-4 text-[#FAF7F2]">
+                  <div className="absolute bottom-4 left-4 right-4 flex items-end justify-between gap-3 text-[#FAF7F2]">
                     <div className="min-w-0">
                       <p className="text-xs text-[#FAF7F2]/85 mb-0.5 truncate">
                         @{activeCreator.username}
                       </p>
-                      <h2 className="text-lg font-bold tracking-tight truncate">
+                      <h2 className="text-base font-bold tracking-tight truncate">
                         {activeHero.title}
                       </h2>
                     </div>
@@ -154,17 +157,17 @@ export function HomePage() {
                   </div>
                 </Link>
 
-                {/* Clean Thumbnail Selector & View Details Bar */}
-                <div className="p-4 sm:p-5 bg-[#FAF7F2] border-t border-[#264653]/10">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
+                {/* Clean 9:16 Thumbnail Selector & View Details Bar */}
+                <div className="p-3.5 sm:p-4 bg-[#FAF7F2] border-t border-[#264653]/10">
+                  <div className="flex items-center justify-between gap-2.5">
+                    <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
                       {heroArtworks.map((item, idx) => (
                         <button
                           key={item.id}
                           type="button"
                           onClick={() => setHeroIndex(idx)}
                           aria-label={`Preview ${item.title}`}
-                          className={`relative w-12 h-9 rounded-lg overflow-hidden border-2 transition-all shrink-0 ${
+                          className={`relative w-7 aspect-[9/16] rounded-md overflow-hidden border-2 transition-all shrink-0 ${
                             idx === heroIndex
                               ? 'border-[#E76F51] scale-105'
                               : 'border-transparent opacity-65 hover:opacity-100'
@@ -181,7 +184,7 @@ export function HomePage() {
 
                     <Link
                       to={`/prompt/${activeHero.id}`}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#264653] hover:bg-[#E76F51] text-[#FAF7F2] text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#264653] hover:bg-[#E76F51] text-[#FAF7F2] text-xs font-semibold transition-colors whitespace-nowrap shrink-0"
                     >
                       <span>View Details</span>
                       <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
@@ -254,9 +257,9 @@ export function HomePage() {
           </Link>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {trendingToday.map((prompt, index) => (
-            <PromptCard key={prompt.id} prompt={prompt} rank={index + 1} />
+        <div className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6">
+          {trendingToday.map((prompt) => (
+            <PromptCard key={prompt.id} prompt={prompt} />
           ))}
         </div>
       </section>
@@ -285,7 +288,7 @@ export function HomePage() {
           </Link>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6">
           {curatedRecent.map((prompt) => (
             <PromptCard key={prompt.id} prompt={prompt} />
           ))}
@@ -328,14 +331,14 @@ export function HomePage() {
           </div>
 
           <div className="lg:col-span-5 grid grid-cols-2 gap-3.5">
-            <div className="aspect-[4/3] rounded-2xl overflow-hidden border border-white/10">
+            <div className="aspect-[9/16] rounded-2xl overflow-hidden border border-white/10">
               <SafeImage
                 src="/src/assets/images/art_3d_sculptural_1794836301810.jpg"
                 alt="3D sculptural art preview"
                 className="w-full h-full object-cover"
               />
             </div>
-            <div className="aspect-[4/3] rounded-2xl overflow-hidden border border-white/10 translate-y-3">
+            <div className="aspect-[9/16] rounded-2xl overflow-hidden border border-white/10 translate-y-3">
               <SafeImage
                 src="/src/assets/images/art_digital_dreamscape_1794836302512.jpg"
                 alt="Digital desert pavilion preview"

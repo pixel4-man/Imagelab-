@@ -45,7 +45,6 @@ export function ExplorePage() {
       if (!q) return true;
       return (
         item.title.toLowerCase().includes(q) ||
-        (item.promptText || '').toLowerCase().includes(q) ||
         item.creatorUsername.toLowerCase().includes(q)
       );
     });
@@ -93,7 +92,7 @@ export function ExplorePage() {
             Explore AI Images & Prompts
           </h1>
           <p className="text-base text-[#264653]/75 leading-relaxed">
-            Browse curated AI artworks and search by image title, AI generation prompt, or creator handle.
+            Browse curated AI artworks and search by image title or creator handle.
           </p>
         </section>
 
@@ -108,8 +107,8 @@ export function ExplorePage() {
               type="search"
               value={query}
               onChange={(e) => handleQueryChange(e.target.value)}
-              placeholder="Search by image title, AI prompt, or @creator..."
-              aria-label="Filter artworks by title, AI prompt, or creator username"
+              placeholder="Search by image title or @creator..."
+              aria-label="Filter artworks by title or creator username"
               className="w-full h-11 pl-10 pr-10 rounded-xl bg-[#FAF7F2] border border-[#264653]/15 text-sm text-[#264653] placeholder:text-[#264653]/45 focus:outline-none focus:border-[#2A9D8F] focus:ring-2 focus:ring-[#2A9D8F]/20"
             />
             {query && (
@@ -154,16 +153,16 @@ export function ExplorePage() {
           <EmptyState
             icon={<Compass className="w-6 h-6" />}
             title="No matching artworks found"
-            description="No AI artworks matched your search for image title, AI prompt, or creator username."
+            description="No AI artworks matched your search for image title or creator username."
             actionLabel="Reset Search"
             onAction={resetAllFilters}
           />
         ) : (
-          <div className="space-y-8">
+          <div className="space-y-6 sm:space-y-8">
             <section
               data-ad-slot="explore_gallery"
               data-ad-label="Explore Gallery Grid"
-              className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"
+              className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6"
             >
               {filteredPrompts.slice(0, 6).map((prompt) => (
                 <PromptCard key={prompt.id} prompt={prompt} />
@@ -174,7 +173,7 @@ export function ExplorePage() {
               <section
                 data-ad-slot="explore_gallery_bottom"
                 data-ad-label="Explore Extended Gallery"
-                className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"
+                className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6"
               >
                 {filteredPrompts.slice(6).map((prompt) => (
                   <PromptCard key={prompt.id} prompt={prompt} />

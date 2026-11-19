@@ -137,24 +137,26 @@ export function TrendingPage() {
           <section
             data-ad-slot="trending_spotlight"
             data-ad-label="Trending Spotlight"
-            className="mb-10 rounded-3xl bg-[#FAF7F2] border border-[#264653]/12 overflow-hidden shadow-sm grid grid-cols-1 lg:grid-cols-12 items-stretch"
+            className="mb-10 rounded-3xl bg-[#FAF7F2] border border-[#264653]/12 overflow-hidden shadow-sm grid grid-cols-1 lg:grid-cols-12 items-center"
           >
-            <Link
-              to={`/prompt/${topSpot.id}`}
-              className="lg:col-span-7 relative aspect-[16/10] lg:aspect-auto min-h-[280px] bg-[#E8DEC8] overflow-hidden group"
-            >
-              <SafeImage
-                src={topSpot.imageUrl}
-                alt={topSpot.title}
-                fallbackTitle={topSpot.title}
-                className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-500"
-              />
-              <div className="absolute top-4 left-4 px-3 py-1.5 rounded-xl bg-[#264653] text-[#FAF7F2] text-xs font-sans font-semibold tabular-nums">
-                #01 Featured in {activeMeta.label}
-              </div>
-            </Link>
+            <div className="lg:col-span-5 p-4 sm:p-6 flex justify-center">
+              <Link
+                to={`/prompt/${topSpot.id}`}
+                className="relative block w-full max-w-[320px] aspect-[9/16] rounded-2xl bg-[#E8DEC8] overflow-hidden group"
+              >
+                <SafeImage
+                  src={topSpot.imageUrl}
+                  alt={topSpot.title}
+                  fallbackTitle={topSpot.title}
+                  className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-500"
+                />
+                <div className="absolute top-3.5 left-3.5 px-3 py-1.5 rounded-xl bg-[#264653] text-[#FAF7F2] text-xs font-sans font-semibold tabular-nums">
+                  #01 Featured
+                </div>
+              </Link>
+            </div>
 
-            <div className="lg:col-span-5 p-6 sm:p-8 flex flex-col justify-between gap-6">
+            <div className="lg:col-span-7 p-6 sm:p-8 flex flex-col justify-between gap-6">
               <div>
                 <Link
                   to={`/creator/${getCreator(topSpot.creatorUsername).username}`}
@@ -212,10 +214,10 @@ export function TrendingPage() {
         <section
           data-ad-slot="trending_grid"
           data-ad-label="Trending Ranked Grid"
-          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6"
+          className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6"
         >
-          {restList.map((prompt, idx) => (
-            <PromptCard key={prompt.id} prompt={prompt} rank={idx + 2} />
+          {restList.map((prompt) => (
+            <PromptCard key={prompt.id} prompt={prompt} />
           ))}
         </section>
       </div>

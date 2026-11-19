@@ -76,7 +76,6 @@ export function ProfilePage() {
           return {
             id: docSnap.id,
             title: String(d.title || 'Untitled Artwork'),
-            promptText: typeof d.promptText === 'string' ? d.promptText : '',
             imageUrl: String(
               d.imageUrl || '/src/assets/images/art_digital_dreamscape_1794836302512.jpg'
             ),
@@ -435,7 +434,7 @@ export function ProfilePage() {
               actionTo="/publish"
             />
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            <div className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6">
               {publishedPrompts.map((prompt) => (
                 <PromptCard key={prompt.id} prompt={prompt} />
               ))}

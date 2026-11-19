@@ -7,19 +7,7 @@ export function SkeletonCard() {
       className="rounded-2xl bg-[#FAF7F2] border border-[#264653]/10 overflow-hidden animate-pulse"
       aria-hidden="true"
     >
-      <div className="aspect-[4/3] bg-[#E8DEC8]/70" />
-      <div className="p-5 space-y-3">
-        <div className="h-3 w-1/2 bg-[#E8DEC8]/80 rounded" />
-        <div className="h-5 w-3/4 bg-[#E8DEC8] rounded" />
-        <div className="space-y-1.5">
-          <div className="h-3.5 w-full bg-[#E8DEC8]/70 rounded" />
-          <div className="h-3.5 w-2/3 bg-[#E8DEC8]/70 rounded" />
-        </div>
-        <div className="pt-3 border-t border-[#264653]/10 flex justify-between">
-          <div className="h-8 w-24 bg-[#E8DEC8]/80 rounded-lg" />
-          <div className="h-8 w-28 bg-[#E8DEC8]/80 rounded-lg" />
-        </div>
-      </div>
+      <div className="w-full aspect-[9/16] bg-[#E8DEC8]/70" />
     </div>
   );
 }

@@ -10,6 +10,7 @@ import {
   Heart,
   ImageOff,
   ImagePlus,
+  Lock,
   RotateCcw,
   ShieldCheck,
   Trash2,
@@ -51,6 +52,7 @@ export function PromptDetailsPage() {
     likedIds,
     savedIds,
     copiedId,
+    unlockedPrompts,
     toggleLike,
     toggleSave,
     copyPrompt,
@@ -72,11 +74,14 @@ export function PromptDetailsPage() {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [fetchedPrompt, setFetchedPrompt] = useState<PromptItem | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
+  const [copyingPrompt, setCopyingPrompt] = useState(false);
+  const [copySuccessBanner, setCopySuccessBanner] = useState(false);
 
   // Admin & Owner management modals
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [editTitle, setEditTitle] = useState('');
   const [editPromptText, setEditPromptText] = useState('');
+  const [loadingEditPrompt, setLoadingEditPrompt] = useState(false);
   const [editImageUrl, setEditImageUrl] = useState('');
   const [editAspectRatio, setEditAspectRatio] = useState<'16:9' | '4:3' | '3:4' | '1:1'>('4:3');
   const [editFile, setEditFile] = useState<File | null>(null);
@@ -91,8 +96,12 @@ export function PromptDetailsPage() {
   const publicPrompt = prompts.find((item) => item.id === id);
 
   useEffect(() => {
+    setCopySuccessBanner(false);
+  }, [id, firebaseUser]);
+
+  useEffect(() => {
     let active = true;
-    if (publicPrompt?.promptText || !id) {
+    if (publicPrompt || !id) {
       if (publicPrompt) {
         setFetchedPrompt(null);
         setLoadingDetails(false);
@@ -149,20 +158,6 @@ export function PromptDetailsPage() {
           if (!active) return;
           if (snap.exists()) {
             const d = snap.data();
-            let resolvedPromptText =
-              typeof d.promptText === 'string' ? d.promptText : '';
-            if (!resolvedPromptText) {
-              const secretSnap = await getDoc(doc(db, 'promptSecrets', id)).catch(
-                () => null
-              );
-              if (
-                secretSnap &&
-                secretSnap.exists() &&
-                typeof secretSnap.data()?.promptText === 'string'
-              ) {
-                resolvedPromptText = secretSnap.data().promptText;
-              }
-            }
             const aspect = (['16:9', '4:3', '3:4', '1:1'].includes(d.aspectRatio)
               ? d.aspectRatio
               : '4:3') as PromptItem['aspectRatio'];
@@ -170,7 +165,6 @@ export function PromptDetailsPage() {
             setFetchedPrompt({
               id: snap.id,
               title: String(d.title || 'Untitled Artwork'),
-              promptText: resolvedPromptText,
               imageUrl: String(
                 d.imageUrl || '/src/assets/images/art_digital_dreamscape_1794836302512.jpg'
               ),
@@ -206,12 +200,7 @@ export function PromptDetailsPage() {
     };
   }, [publicPrompt, id, firebaseUser, getIdToken]);
 
-  const prompt = publicPrompt
-    ? {
-        ...publicPrompt,
-        promptText: publicPrompt.promptText || fetchedPrompt?.promptText || '',
-      }
-    : fetchedPrompt;
+  const prompt = publicPrompt || fetchedPrompt;
 
   useEffect(() => {
     if (!lightboxOpen) return;
@@ -224,23 +213,56 @@ export function PromptDetailsPage() {
 
   const relatedPrompts = useMemo(() => {
     if (!prompt) return [];
-    return prompts.filter((item) => item.id !== prompt.id).slice(0, 3);
+    return prompts.filter((item) => item.id !== prompt.id).slice(0, 4);
   }, [prompts, prompt]);
 
   const isOwner = Boolean(
     firebaseUser && prompt?.authorUid && prompt.authorUid === firebaseUser.uid
   );
 
-  const openManageEditModal = (openImagePicker = false) => {
+  const openManageEditModal = async (openImagePicker = false) => {
     if (!prompt) return;
+    const knownPromptText = unlockedPrompts[prompt.id] || prompt.promptText || '';
     setEditTitle(prompt.title);
-    setEditPromptText(prompt.promptText || '');
+    setEditPromptText(knownPromptText);
     setEditImageUrl(prompt.imageUrl);
     setEditAspectRatio(prompt.aspectRatio || '4:3');
     setEditFile(null);
     setEditModalOpen(true);
     if (openImagePicker) {
       window.setTimeout(() => editFileRef.current?.click(), 80);
+    }
+
+    if (!knownPromptText && firebaseUser) {
+      setLoadingEditPrompt(true);
+      try {
+        const token = await getIdToken();
+        if (token) {
+          const manageRes = await fetch(
+            `/api/prompts/${encodeURIComponent(prompt.id)}/manage`,
+            {
+              headers: { Authorization: `Bearer ${token}` },
+              cache: 'no-store',
+            }
+          );
+          if (manageRes.ok) {
+            const payload = (await manageRes.json()) as { prompt?: PromptItem };
+            if (typeof payload.prompt?.promptText === 'string') {
+              setEditPromptText(payload.prompt.promptText);
+              return;
+            }
+          } else if (manageRes.status === 503 && db) {
+            const secretSnap = await getDoc(doc(db, 'promptSecrets', prompt.id));
+            if (secretSnap.exists() && typeof secretSnap.data()?.promptText === 'string') {
+              setEditPromptText(secretSnap.data().promptText);
+            }
+          }
+        }
+      } catch {
+        // Admin/owner can still re-enter prompt text if unavailable
+      } finally {
+        setLoadingEditPrompt(false);
+      }
     }
   };
 
@@ -455,6 +477,30 @@ export function PromptDetailsPage() {
   const isPublished = (prompt.status || 'approved') === 'approved';
   const canonicalOrigin = resolveCanonicalOrigin();
   const canonicalPromptPath = `/prompt/${encodeURIComponent(prompt.id)}`;
+  const unlockedPromptText = firebaseUser ? unlockedPrompts[prompt.id] || '' : '';
+
+  const handleCopyFullPrompt = async () => {
+    if (!firebaseUser) {
+      const targetUrl = `/prompt/${prompt.id}`;
+      try {
+        sessionStorage.setItem('imagelab_post_auth_redirect', targetUrl);
+      } catch {
+        // Ignore storage errors
+      }
+      navigate(`/signup?redirect=${encodeURIComponent(targetUrl)}`);
+      return;
+    }
+
+    setCopyingPrompt(true);
+    try {
+      const ok = await copyPrompt(prompt.id);
+      if (ok) {
+        setCopySuccessBanner(true);
+      }
+    } finally {
+      setCopyingPrompt(false);
+    }
+  };
 
   return (
     <PageTransition>
@@ -605,18 +651,18 @@ export function PromptDetailsPage() {
 
         {/* Main Detail Split */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-10 items-start">
-          {/* Large Original Image */}
+          {/* Large 9:16 Portrait Image */}
           <div
             data-ad-slot="prompt_details_image"
             data-ad-label="Prompt Details Image Column"
-            className="lg:col-span-7"
+            className="lg:col-span-6"
           >
-            <div className="relative rounded-3xl overflow-hidden bg-[#FAF7F2] border border-[#264653]/12 shadow-[0_14px_40px_-14px_rgba(38,70,83,0.18)] group">
+            <div className="relative w-full max-w-[440px] mx-auto aspect-[9/16] rounded-3xl overflow-hidden bg-[#FAF7F2] border border-[#264653]/12 shadow-[0_14px_40px_-14px_rgba(38,70,83,0.18)] group">
               <SafeImage
                 src={prompt.imageUrl}
                 alt={prompt.title}
                 fallbackTitle={prompt.title}
-                className="w-full h-auto max-h-[76vh] object-contain mx-auto bg-[#E8DEC8]/30"
+                className="w-full h-full object-cover"
               />
               <button
                 type="button"
@@ -630,11 +676,11 @@ export function PromptDetailsPage() {
             </div>
           </div>
 
-          {/* Right Info, Engagement, Complete AI Prompt & Creator Column */}
+          {/* Right Info, Engagement, Protected AI Prompt & Creator Column */}
           <div
             data-ad-slot="prompt_details_panel"
             data-ad-label="Prompt Details Info Panel"
-            className="lg:col-span-5 space-y-6"
+            className="lg:col-span-6 space-y-6"
           >
             <div className="space-y-3">
               <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm font-normal text-[#264653]/70">
@@ -661,16 +707,17 @@ export function PromptDetailsPage() {
               </h1>
             </div>
 
-            {/* Complete AI Generation Prompt Panel (Normal DM Sans Typography, No Category/Description) */}
+            {/* Protected AI Generation Prompt Panel (Zero public prompt leakage; auth-gated Copy Full Prompt) */}
             <div className="rounded-3xl bg-[#FAF7F2] border border-[#264653]/12 p-5 sm:p-6 space-y-4 shadow-sm">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
                 <h2 className="text-sm font-bold text-[#264653]">
                   Complete AI Generation Prompt
                 </h2>
                 <button
                   type="button"
-                  onClick={() => copyPrompt(prompt.id)}
-                  className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all min-h-[40px] shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
+                  disabled={copyingPrompt}
+                  onClick={handleCopyFullPrompt}
+                  className={`inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold transition-all min-h-[42px] shadow-xs disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
                     isCopied
                       ? 'bg-[#2A9D8F] text-white focus-visible:ring-[#2A9D8F]'
                       : 'bg-[#E76F51] hover:bg-[#D05A3C] text-white focus-visible:ring-[#E76F51]'
@@ -684,16 +731,42 @@ export function PromptDetailsPage() {
                   ) : (
                     <>
                       <Copy className="w-4 h-4" aria-hidden="true" />
-                      <span>Copy Prompt</span>
+                      <span>{copyingPrompt ? 'Copying...' : 'Copy Full Prompt'}</span>
                     </>
                   )}
                 </button>
               </div>
 
+              {(copySuccessBanner || isCopied) && (
+                <div
+                  role="status"
+                  className="rounded-xl bg-[#2A9D8F]/12 border border-[#2A9D8F]/30 px-3.5 py-2.5 flex items-center gap-2 text-xs font-semibold text-[#218175]"
+                >
+                  <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>Prompt copied successfully</span>
+                </div>
+              )}
+
               <div className="rounded-2xl bg-[#F4EDE4]/75 border border-[#264653]/10 p-4 sm:p-5">
-                <p className="font-sans font-normal text-sm sm:text-[15px] leading-relaxed text-[#264653] whitespace-pre-wrap select-all">
-                  {prompt.promptText || 'Prompt text is loading...'}
-                </p>
+                {!firebaseUser ? (
+                  <div className="flex items-start gap-2.5 text-sm text-[#264653]/80 leading-relaxed">
+                    <Lock className="w-4 h-4 text-[#E76F51] shrink-0 mt-0.5" aria-hidden="true" />
+                    <span>
+                      This prompt is protected. Click <strong>Copy Full Prompt</strong> to sign in or create a free account and return here to copy it.
+                    </span>
+                  </div>
+                ) : unlockedPromptText ? (
+                  <p className="font-sans font-normal text-sm sm:text-[15px] leading-relaxed text-[#264653] whitespace-pre-wrap select-all">
+                    {unlockedPromptText}
+                  </p>
+                ) : (
+                  <div className="flex items-start gap-2.5 text-sm text-[#264653]/80 leading-relaxed">
+                    <Lock className="w-4 h-4 text-[#2A9D8F] shrink-0 mt-0.5" aria-hidden="true" />
+                    <span>
+                      Click <strong>Copy Full Prompt</strong> above to copy the complete generation prompt to your clipboard.
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3 pt-1">
@@ -788,7 +861,7 @@ export function PromptDetailsPage() {
             </Link>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6">
             {relatedPrompts.map((item) => (
               <PromptCard key={item.id} prompt={item} />
             ))}
@@ -873,9 +946,11 @@ export function PromptDetailsPage() {
                 <textarea
                   rows={5}
                   required
+                  disabled={loadingEditPrompt}
+                  placeholder={loadingEditPrompt ? 'Loading protected prompt...' : 'Enter the complete AI generation prompt...'}
                   value={editPromptText}
                   onChange={(e) => setEditPromptText(e.target.value)}
-                  className="w-full p-3.5 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 font-sans font-normal text-sm leading-relaxed text-[#264653]"
+                  className="w-full p-3.5 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 font-sans font-normal text-sm leading-relaxed text-[#264653] disabled:opacity-60"
                 />
               </div>
 

@@ -39,6 +39,9 @@ test('Dirty Dozen Blueprint & Rules Coverage Verification', async () => {
   assert.match(rules, /match \/adPlacements\/\{placementId\}[\s\S]*allow get, list: if isAdmin\(\)/);
   assert.match(rules, /isValidAdPlacement[\s\S]*'width'[\s\S]*'height'[\s\S]*'adType'/);
   assert.match(rules, /match \/ads\/\{adId\}[\s\S]*allow get, list: if isAdmin\(\)/);
+  assert.match(rules, /function isValidOptionalDestinationUrl\(url\)/);
+  assert.match(rules, /isValidAdCampaign[\s\S]*'destinationUrl'[\s\S]*isValidOptionalDestinationUrl/);
+  assert.match(rules, /isValidPublicAdSlot[\s\S]*'destinationUrl'[\s\S]*isValidOptionalDestinationUrl/);
   assert.match(
     rules,
     /match \/publicAdSlots\/\{adId\}[\s\S]*allow get: if isValidId\(adId\) && existing\(\)\.status == 'active'/

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AlertCircle, CheckCircle2, Eye, EyeOff, Lock, Mail, User } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { BackButton } from '../components/BackButton';
@@ -51,6 +51,7 @@ export function SignUpPage() {
     }
   })();
   const redirectTarget = queryRedirect || storedRedirect;
+  const redirectTargetRef = useRef<string | null>(redirectTarget);
 
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
@@ -72,6 +73,7 @@ export function SignUpPage() {
 
   useEffect(() => {
     if (redirectTarget) {
+      redirectTargetRef.current = redirectTarget;
       try {
         sessionStorage.setItem(POST_AUTH_REDIRECT_KEY, redirectTarget);
       } catch {
@@ -81,12 +83,13 @@ export function SignUpPage() {
   }, [redirectTarget]);
 
   const completeRedirect = (fallbackPath: string) => {
+    const destination = redirectTarget || redirectTargetRef.current || fallbackPath;
     try {
       sessionStorage.removeItem(POST_AUTH_REDIRECT_KEY);
     } catch {
       // Ignore storage errors
     }
-    navigate(redirectTarget || fallbackPath, { replace: true });
+    navigate(destination, { replace: true });
   };
 
   useEffect(() => {
@@ -242,6 +245,11 @@ export function SignUpPage() {
                 <p className="text-sm text-[#264653]/70 mt-1.5">
                   Start curating prompts and sharing your visual studies.
                 </p>
+                {redirectTarget?.startsWith('/prompt/') && (
+                  <p className="mt-2.5 rounded-xl bg-[#2A9D8F]/10 border border-[#2A9D8F]/25 px-3.5 py-2 text-xs font-medium text-[#264653]">
+                    Create an account or sign in to return to the artwork and copy its full prompt.
+                  </p>
+                )}
               </div>
 
               {displayedError && (

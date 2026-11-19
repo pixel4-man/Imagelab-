@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -7,6 +7,7 @@ import {
   Edit3,
   Eye,
   ExternalLink,
+  Layers,
   MapPin,
   Megaphone,
   PauseCircle,
@@ -16,10 +17,15 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
-import { usePlacementSelector } from '../context/PlacementSelectorContext';
+import {
+  clearPendingAdDraft,
+  readPendingAdDraft,
+  savePendingAdDraft,
+  usePlacementSelector,
+} from '../context/PlacementSelectorContext';
 import {
   AD_TYPES,
   AdInsertPosition,
@@ -29,8 +35,11 @@ import {
   AdType,
   DIMENSION_PRESETS,
   VisualPlacementRecord,
+  deriveInternalAdName,
+  detectAdProvider,
   formatReadableError,
   getAdTypeLabel,
+  validateSafeHttpUrl,
 } from '../types/ads';
 import {
   createAdvertisement,
@@ -46,17 +55,75 @@ interface AdsManagerWorkspaceProps {
   onCountChange?: (counts: { total: number; active: number; placements: number }) => void;
 }
 
-const DEFAULT_AD_FORM: AdPayload = {
-  name: '',
-  provider: '',
+interface AdFormFields {
+  adType: AdType;
+  placementId: string;
+  width: string;
+  height: string;
+  status: AdStatus;
+  priority: number;
+  destinationUrl: string;
+  scriptCode: string;
+}
+
+const DEFAULT_AD_FORM: AdFormFields = {
   adType: 'responsive_banner',
-  scriptCode: '',
   placementId: '',
   width: 'auto',
   height: 'auto',
   status: 'active',
   priority: 10,
+  destinationUrl: '',
+  scriptCode: '',
 };
+
+function PlacementDiagram({ placement }: { placement: VisualPlacementRecord }) {
+  return (
+    <div className="rounded-xl bg-[#FAF7F2] border border-[#264653]/14 p-3 space-y-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+        <span className="inline-flex items-center gap-1.5 font-semibold text-[#264653]">
+          <Layers className="w-3.5 h-3.5 text-[#2A9D8F]" aria-hidden="true" />
+          <span>Visual Slot Layout</span>
+        </span>
+        <span className="font-mono text-[#264653]/70">
+          {placement.pageRoute} · {placement.width || 'auto'} × {placement.height || 'auto'}
+        </span>
+      </div>
+
+      <div className="rounded-lg bg-[#F4EDE4]/75 border border-[#264653]/10 p-2 space-y-1.5 text-[11px]">
+        {placement.position === 'before' && (
+          <div className="px-2.5 py-1.5 rounded-md bg-[#E76F51]/15 border border-dashed border-[#E76F51] text-[#9A3412] font-semibold flex items-center justify-between">
+            <span>AD RENDERED BEFORE TARGET</span>
+            <span className="font-mono text-[10px]">
+              {placement.width} × {placement.height}
+            </span>
+          </div>
+        )}
+
+        <div className="px-2.5 py-1.5 rounded-md bg-white/85 border border-[#264653]/12 text-[#264653]/80 space-y-1">
+          <div className="truncate font-medium">Target Area: {placement.elementInfo}</div>
+          {placement.position === 'inside' && (
+            <div className="px-2 py-1 rounded bg-[#E76F51]/15 border border-dashed border-[#E76F51] text-[#9A3412] font-semibold flex items-center justify-between">
+              <span>AD RENDERED INSIDE TARGET</span>
+              <span className="font-mono text-[10px]">
+                {placement.width} × {placement.height}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {placement.position === 'after' && (
+          <div className="px-2.5 py-1.5 rounded-md bg-[#E76F51]/15 border border-dashed border-[#E76F51] text-[#9A3412] font-semibold flex items-center justify-between">
+            <span>AD RENDERED AFTER TARGET</span>
+            <span className="font-mono text-[10px]">
+              {placement.width} × {placement.height}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function formatTimestamp(iso: string): string {
   if (!iso) return '—';
@@ -74,6 +141,7 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   const { getIdToken } = useAuth();
   const { showToast } = useApp();
   const { enterSelectionMode } = usePlacementSelector();
+  const location = useLocation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -90,9 +158,12 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   // Create / Edit Ad Modal
   const [modalOpen, setModalOpen] = useState(false);
   const [editingAdId, setEditingAdId] = useState<string | null>(null);
-  const [formState, setFormState] = useState<AdPayload>(DEFAULT_AD_FORM);
+  const [formState, setFormState] = useState<AdFormFields>(DEFAULT_AD_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [inlinePreviewOpen, setInlinePreviewOpen] = useState(false);
+  const [inlinePreviewVersion, setInlinePreviewVersion] = useState(0);
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Edit Placement Modal
   const [editingPlacement, setEditingPlacement] = useState<VisualPlacementRecord | null>(null);
@@ -118,6 +189,7 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
 
   // Previews & Delete Confirms
   const [previewAd, setPreviewAd] = useState<AdRecord | null>(null);
+  const [previewingPlacement, setPreviewingPlacement] = useState<VisualPlacementRecord | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AdRecord | null>(null);
   const [deletePlacementTarget, setDeletePlacementTarget] = useState<VisualPlacementRecord | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -161,21 +233,33 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     loadWorkspaceData();
   }, [loadWorkspaceData]);
 
-  // Support deep-linking from Visual Placement Confirmation -> "Create Ad Here"
+  // Support returning from Pick New Area / Visual Placement Selection with ?placementId=...
   useEffect(() => {
     const preselectedPlacementId = searchParams.get('placementId');
     if (!preselectedPlacementId || placements.length === 0) return;
     const matched = placements.find((p) => p.id === preselectedPlacementId);
     if (matched) {
-      setEditingAdId(null);
+      const draft = readPendingAdDraft();
+      clearPendingAdDraft();
+      setEditingAdId(draft?.editingAdId || null);
       setFormState({
-        ...DEFAULT_AD_FORM,
+        adType: draft?.adType || matched.adType || DEFAULT_AD_FORM.adType,
         placementId: matched.id,
-        adType: matched.adType || DEFAULT_AD_FORM.adType,
-        width: matched.width || DEFAULT_AD_FORM.width,
-        height: matched.height || DEFAULT_AD_FORM.height,
+        width:
+          draft && draft.width && draft.width !== 'auto'
+            ? draft.width
+            : matched.width || DEFAULT_AD_FORM.width,
+        height:
+          draft && draft.height && draft.height !== 'auto'
+            ? draft.height
+            : matched.height || DEFAULT_AD_FORM.height,
+        status: draft?.status || DEFAULT_AD_FORM.status,
+        priority: draft?.priority ?? DEFAULT_AD_FORM.priority,
+        destinationUrl: draft?.destinationUrl || '',
+        scriptCode: draft?.scriptCode || '',
       });
       setFormError(null);
+      setInlinePreviewOpen(Boolean(draft?.scriptCode?.trim()));
       setModalOpen(true);
 
       const next = new URLSearchParams(searchParams);
@@ -192,7 +276,23 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     return map;
   }, [placements]);
 
-  const startVisualSelection = (route = '/') => {
+  const startVisualSelection = (route = '/', preserveFormDraft = false) => {
+    if (preserveFormDraft) {
+      const currentReturn = `${location.pathname}${location.search}`;
+      savePendingAdDraft({
+        editingAdId,
+        adType: formState.adType,
+        width: formState.width,
+        height: formState.height,
+        status: formState.status,
+        priority: formState.priority,
+        scriptCode: formState.scriptCode,
+        destinationUrl: formState.destinationUrl,
+        returnTo: currentReturn,
+      });
+    } else {
+      clearPendingAdDraft();
+    }
     enterSelectionMode();
     navigate(route);
   };
@@ -213,6 +313,7 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
   }, [ads, searchTerm, statusFilter, placementFilter, placementMap]);
 
   const openCreateModal = () => {
+    clearPendingAdDraft();
     const first = placements[0];
     setEditingAdId(null);
     setFormState({
@@ -223,16 +324,17 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
       height: first?.height || DEFAULT_AD_FORM.height,
     });
     setFormError(null);
+    setInlinePreviewOpen(false);
     setModalOpen(true);
   };
 
   const openEditModal = (ad: AdRecord) => {
+    clearPendingAdDraft();
     setEditingAdId(ad.id);
     setFormState({
-      name: ad.name,
-      provider: ad.provider,
       adType: ad.adType,
       scriptCode: ad.scriptCode,
+      destinationUrl: ad.destinationUrl || '',
       placementId: ad.placementId,
       width: ad.width,
       height: ad.height,
@@ -240,6 +342,7 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
       priority: ad.priority,
     });
     setFormError(null);
+    setInlinePreviewOpen(false);
     setModalOpen(true);
   };
 
@@ -247,18 +350,49 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     e.preventDefault();
     setFormError(null);
     if (!formState.placementId) {
-      setFormError('Select a saved visual placement (or select one on the website first).');
+      setFormError('Select a saved visual placement (or click "+ Pick New Area" to select one on the website).');
       return;
     }
+
+    const urlCheck = validateSafeHttpUrl(formState.destinationUrl);
+    if (!urlCheck.valid) {
+      setFormError(urlCheck.error || 'Destination URL must be a valid http:// or https:// URL.');
+      return;
+    }
+
+    const selectedPlacement = placementMap.get(formState.placementId);
+    const detectedProvider = detectAdProvider(formState.scriptCode);
+    const derivedName = deriveInternalAdName({
+      adType: formState.adType,
+      provider: detectedProvider,
+      placementName: selectedPlacement?.name,
+      scriptCode: formState.scriptCode,
+    });
+
+    const payload: AdPayload = {
+      name: derivedName,
+      provider: detectedProvider,
+      adType: formState.adType,
+      scriptCode: formState.scriptCode,
+      destinationUrl: urlCheck.sanitized,
+      placementId: formState.placementId,
+      width: formState.width,
+      height: formState.height,
+      status: formState.status,
+      priority: formState.priority,
+    };
+
     setSaving(true);
     try {
       if (editingAdId) {
-        await updateAdvertisement(editingAdId, formState, getIdToken);
+        await updateAdvertisement(editingAdId, payload, getIdToken);
       } else {
-        await createAdvertisement(formState, getIdToken);
+        await createAdvertisement(payload, getIdToken);
       }
 
+      clearPendingAdDraft();
       setModalOpen(false);
+      setInlinePreviewOpen(false);
       showToast(editingAdId ? 'Advertisement updated' : 'Advertisement created', 'teal');
       notifyActiveAdsUpdated();
       await loadWorkspaceData();
@@ -398,23 +532,67 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
     }
   };
 
-  const openModalPreview = () => {
-    const mockPreview: AdRecord = {
-      id: editingAdId || 'preview_draft',
-      name: formState.name || 'Draft Advertisement',
-      provider: formState.provider || 'Preview Provider',
+  const selectedPlacementObj = formState.placementId
+    ? placementMap.get(formState.placementId) || null
+    : null;
+
+  const liveDraftPreviewAd: AdRecord | null = useMemo(() => {
+    if (!inlinePreviewOpen || formState.scriptCode.trim().length < 5) return null;
+    const provider = detectAdProvider(formState.scriptCode);
+    const resolvedWidth =
+      formState.width && formState.width !== 'auto'
+        ? formState.width
+        : selectedPlacementObj?.width || 'auto';
+    const resolvedHeight =
+      formState.height && formState.height !== 'auto'
+        ? formState.height
+        : selectedPlacementObj?.height || 'auto';
+    const destCheck = validateSafeHttpUrl(formState.destinationUrl);
+    return {
+      id: `${editingAdId || 'preview_draft'}_v${inlinePreviewVersion}`,
+      name: deriveInternalAdName({
+        adType: formState.adType,
+        provider,
+        placementName: selectedPlacementObj?.name,
+        scriptCode: formState.scriptCode,
+      }),
+      provider,
       adType: formState.adType,
       scriptCode: formState.scriptCode,
+      destinationUrl: destCheck.valid ? destCheck.sanitized : '',
       placementId: formState.placementId || 'preview_slot',
-      placementName: placementMap.get(formState.placementId)?.name || 'Visual Placement',
-      width: formState.width || 'auto',
-      height: formState.height || 'auto',
+      placementName: selectedPlacementObj?.name || 'Visual Placement',
+      width: resolvedWidth,
+      height: resolvedHeight,
       status: 'active',
       priority: formState.priority,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    setPreviewAd(mockPreview);
+  }, [
+    inlinePreviewOpen,
+    inlinePreviewVersion,
+    editingAdId,
+    formState,
+    selectedPlacementObj,
+  ]);
+
+  const openModalPreview = () => {
+    setFormError(null);
+    if (formState.scriptCode.trim().length < 5) {
+      setFormError('Paste an advertisement script, HTML banner, or image URL before previewing.');
+      return;
+    }
+    const urlCheck = validateSafeHttpUrl(formState.destinationUrl);
+    if (!urlCheck.valid) {
+      setFormError(urlCheck.error || 'Destination URL must be a valid http:// or https:// URL.');
+      return;
+    }
+    setInlinePreviewVersion((v) => v + 1);
+    setInlinePreviewOpen(true);
+    window.setTimeout(() => {
+      previewContainerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 60);
   };
 
   return (
@@ -561,21 +739,17 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <button
                       type="button"
-                      onClick={() => {
-                        const targetRoute = plc.pageRoute.includes('*')
-                          ? '/'
-                          : plc.pageRoute;
-                        startVisualSelection(targetRoute);
-                      }}
+                      onClick={() => setPreviewingPlacement(plc)}
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#F4EDE4] hover:bg-[#E8DEC8] text-[#264653] text-xs font-semibold"
                     >
-                      <ExternalLink className="w-3.5 h-3.5" />
+                      <Eye className="w-3.5 h-3.5" />
                       <span>Preview Placement</span>
                     </button>
 
                     <button
                       type="button"
                       onClick={() => {
+                        clearPendingAdDraft();
                         setEditingAdId(null);
                         setFormState({
                           ...DEFAULT_AD_FORM,
@@ -585,6 +759,7 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                           height: plc.height || DEFAULT_AD_FORM.height,
                         });
                         setFormError(null);
+                        setInlinePreviewOpen(false);
                         setModalOpen(true);
                       }}
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#2A9D8F]/12 text-[#218175] hover:bg-[#2A9D8F] hover:text-white text-xs font-semibold"
@@ -1077,36 +1252,6 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-bold text-[#264653] mb-1.5">
-                    Advertisement Name *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formState.name}
-                    onChange={(e) => setFormState((p) => ({ ...p, name: e.target.value }))}
-                    placeholder="e.g., Homepage Leaderboard"
-                    className="w-full h-11 px-3.5 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 text-sm text-[#264653]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#264653] mb-1.5">
-                    Ad Provider *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={formState.provider}
-                    onChange={(e) => setFormState((p) => ({ ...p, provider: e.target.value }))}
-                    placeholder="e.g., Google AdSense, Adsterra, Custom"
-                    className="w-full h-11 px-3.5 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 text-sm text-[#264653]"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-[#264653] mb-1.5">
                     Ad Type *
                   </label>
                   <select
@@ -1133,7 +1278,7 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                       type="button"
                       onClick={() => {
                         setModalOpen(false);
-                        startVisualSelection('/');
+                        startVisualSelection('/', true);
                       }}
                       className="text-[11px] font-semibold text-[#E76F51] hover:underline"
                     >
@@ -1170,6 +1315,8 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                   </select>
                 </div>
               </div>
+
+              {selectedPlacementObj && <PlacementDiagram placement={selectedPlacementObj} />}
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
@@ -1226,10 +1373,33 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
               <div>
                 <div className="flex items-center justify-between mb-1.5">
                   <label className="text-xs font-bold text-[#264653]">
+                    Destination URL <span className="font-normal text-[#264653]/60">(Optional)</span>
+                  </label>
+                  <span className="text-[11px] text-[#264653]/60">
+                    http:// or https:// for custom image/banner clicks
+                  </span>
+                </div>
+                <input
+                  type="url"
+                  value={formState.destinationUrl}
+                  onChange={(e) =>
+                    setFormState((p) => ({ ...p, destinationUrl: e.target.value }))
+                  }
+                  placeholder="https://example.com/landing-page"
+                  className="w-full h-11 px-3.5 rounded-xl bg-[#F4EDE4]/65 border border-[#264653]/15 text-xs text-[#264653]"
+                />
+                <p className="mt-1 text-[11px] text-[#264653]/60">
+                  Opens in a new tab when clicked on custom banners without links. Third-party ad scripts (e.g., Adsterra) and banners with existing links keep their original click behavior.
+                </p>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-bold text-[#264653]">
                     Advertisement Script Code *
                   </label>
                   <span className="text-[11px] text-[#264653]/60">
-                    Executed inside isolated sandboxed container
+                    Provider auto-detected · Isolated sandboxed container
                   </span>
                 </div>
                 <textarea
@@ -1237,10 +1407,33 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                   required
                   value={formState.scriptCode}
                   onChange={(e) => setFormState((p) => ({ ...p, scriptCode: e.target.value }))}
-                  placeholder="<script async src='...'></script>&#10;<!-- Or AdSense <ins>, Native HTML, or Custom Banner HTML/JS -->"
+                  placeholder="<script async src='...'></script>&#10;<!-- Or Adsterra snippet, HTML banner, or direct https:// image banner URL -->"
                   className="w-full p-3.5 rounded-xl bg-[#F4EDE4]/70 border border-[#264653]/15 font-mono text-xs leading-relaxed text-[#264653]"
                 />
               </div>
+
+              {inlinePreviewOpen && liveDraftPreviewAd && (
+                <div ref={previewContainerRef} className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-[#264653]">
+                      Live Advertisement Preview
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setInlinePreviewOpen(false)}
+                      className="text-[11px] font-semibold text-[#264653]/65 hover:text-[#264653]"
+                    >
+                      Hide Preview
+                    </button>
+                  </div>
+                  <AdSlot
+                    placementId={liveDraftPreviewAd.placementId}
+                    placementName={selectedPlacementObj?.name}
+                    testMode
+                    adOverride={liveDraftPreviewAd}
+                  />
+                </div>
+              )}
 
               <div className="pt-2 flex flex-wrap items-center justify-between gap-3 border-t border-[#264653]/10">
                 <button
@@ -1256,7 +1449,11 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                 <div className="flex items-center gap-2.5">
                   <button
                     type="button"
-                    onClick={() => setModalOpen(false)}
+                    onClick={() => {
+                      clearPendingAdDraft();
+                      setInlinePreviewOpen(false);
+                      setModalOpen(false);
+                    }}
                     className="px-4 py-2.5 rounded-xl text-sm font-semibold text-[#264653]/75 hover:bg-[#F4EDE4] min-h-[42px]"
                   >
                     Cancel
@@ -1267,13 +1464,7 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                     className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#E76F51] hover:bg-[#D05A3C] disabled:opacity-60 text-white text-sm font-semibold transition-colors min-h-[42px]"
                   >
                     <CheckCircle2 className="w-4 h-4" />
-                    <span>
-                      {saving
-                        ? 'Saving...'
-                        : editingAdId
-                          ? 'Save Advertisement'
-                          : 'Save Advertisement'}
-                    </span>
+                    <span>{saving ? 'Saving...' : 'Save Advertisement'}</span>
                   </button>
                 </div>
               </div>
@@ -1492,6 +1683,129 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
         </div>
       )}
 
+      {/* Preview Placement Area & Linked Ads Modal */}
+      {previewingPlacement && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="placement-preview-title"
+          className="fixed inset-0 z-[60] bg-[#264653]/65 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto"
+        >
+          <div className="w-full max-w-3xl rounded-3xl bg-[#FAF7F2] border border-[#264653]/15 shadow-2xl p-6 sm:p-8 space-y-5 my-8">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold text-[#2A9D8F]">
+                  Visual Placement Representation
+                </p>
+                <h3 id="placement-preview-title" className="text-lg font-bold text-[#264653]">
+                  {previewingPlacement.name}
+                </h3>
+                <p className="text-xs text-[#264653]/70">
+                  Route: <span className="font-mono">{previewingPlacement.pageRoute}</span> · Position:{' '}
+                  <strong className="uppercase">{previewingPlacement.position}</strong> · Dimensions:{' '}
+                  <span className="font-mono">
+                    {previewingPlacement.width} × {previewingPlacement.height}
+                  </span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewingPlacement(null)}
+                aria-label="Close placement preview"
+                className="p-2 rounded-xl text-[#264653]/70 hover:bg-[#F4EDE4] min-w-[44px] min-h-[44px] flex items-center justify-center"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <PlacementDiagram placement={previewingPlacement} />
+
+            <div className="space-y-3">
+              {(() => {
+                const linkedAds = ads
+                  .filter((a) => a.placementId === previewingPlacement.id)
+                  .sort((a, b) => a.priority - b.priority);
+                if (linkedAds.length === 0) {
+                  return (
+                    <div className="rounded-2xl border border-dashed border-[#264653]/25 bg-[#F4EDE4]/70 p-6 text-center space-y-2">
+                      <p className="text-xs font-semibold text-[#264653]">
+                        No advertisements are assigned to this placement yet.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = previewingPlacement;
+                          setPreviewingPlacement(null);
+                          clearPendingAdDraft();
+                          setEditingAdId(null);
+                          setFormState({
+                            ...DEFAULT_AD_FORM,
+                            placementId: target.id,
+                            adType: target.adType || DEFAULT_AD_FORM.adType,
+                            width: target.width || DEFAULT_AD_FORM.width,
+                            height: target.height || DEFAULT_AD_FORM.height,
+                          });
+                          setFormError(null);
+                          setInlinePreviewOpen(false);
+                          setModalOpen(true);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#2A9D8F] text-white text-xs font-semibold"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Assign Ad to This Placement</span>
+                      </button>
+                    </div>
+                  );
+                }
+                return linkedAds.map((linked) => (
+                  <AdSlot
+                    key={linked.id}
+                    placementId={previewingPlacement.id}
+                    placementName={previewingPlacement.name}
+                    testMode
+                    adOverride={{
+                      ...linked,
+                      width:
+                        linked.width && linked.width !== 'auto'
+                          ? linked.width
+                          : previewingPlacement.width,
+                      height:
+                        linked.height && linked.height !== 'auto'
+                          ? linked.height
+                          : previewingPlacement.height,
+                    }}
+                  />
+                ));
+              })()}
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#264653]/10">
+              <button
+                type="button"
+                onClick={() => {
+                  const targetRoute = previewingPlacement.pageRoute.includes('*')
+                    ? '/'
+                    : previewingPlacement.pageRoute;
+                  setPreviewingPlacement(null);
+                  startVisualSelection(targetRoute);
+                }}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#F4EDE4] hover:bg-[#E8DEC8] text-[#264653] text-xs font-semibold"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>View / Select Areas on Live Page</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreviewingPlacement(null)}
+                className="px-5 py-2.5 rounded-xl bg-[#264653] text-white text-xs font-semibold"
+              >
+                Close Preview
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Preview Advertisement Modal (Test Mode) */}
       {previewAd && (
         <div
@@ -1516,8 +1830,14 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                       previewAd.placementName ||
                       previewAd.placementId}
                   </strong>{' '}
-                  · Format: {getAdTypeLabel(previewAd.adType)} · Size: {previewAd.width} ×{' '}
-                  {previewAd.height}
+                  · Format: {getAdTypeLabel(previewAd.adType)} · Size:{' '}
+                  {previewAd.width !== 'auto'
+                    ? previewAd.width
+                    : placementMap.get(previewAd.placementId)?.width || 'auto'}{' '}
+                  ×{' '}
+                  {previewAd.height !== 'auto'
+                    ? previewAd.height
+                    : placementMap.get(previewAd.placementId)?.height || 'auto'}
                 </p>
               </div>
               <button
@@ -1535,7 +1855,17 @@ export function AdsManagerWorkspace({ onCountChange }: AdsManagerWorkspaceProps)
                 placementId={previewAd.placementId}
                 placementName={placementMap.get(previewAd.placementId)?.name}
                 testMode
-                adOverride={previewAd}
+                adOverride={{
+                  ...previewAd,
+                  width:
+                    previewAd.width !== 'auto'
+                      ? previewAd.width
+                      : placementMap.get(previewAd.placementId)?.width || 'auto',
+                  height:
+                    previewAd.height !== 'auto'
+                      ? previewAd.height
+                      : placementMap.get(previewAd.placementId)?.height || 'auto',
+                }}
               />
             </div>
 

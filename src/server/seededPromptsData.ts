@@ -1,5 +1,4 @@
 import type { PromptItem } from '../types/prompt.ts';
-import { SEEDED_PROMPT_SECRETS } from './seededPromptSecrets.ts';
 
 export const RAW_READY_MADE_PROMPTS: PromptItem[] = [
   {
@@ -204,5 +203,5 @@ export const READY_MADE_PROMPTS: PromptItem[] = RAW_READY_MADE_PROMPTS.map((item
   ...item,
   status: 'approved',
   authorUid: 'imagelab_official',
-  promptText: SEEDED_PROMPT_SECRETS[item.id] || '',
 }));
+

@@ -28,10 +28,12 @@ import {
   BUILT_IN_AD_TYPES,
   VisualPlacementPayload,
   VisualPlacementRecord,
+  detectAdProvider,
   findDuplicatePlacement,
   normalizePageRoute,
   validateAdPayload,
   validatePlacementPayload,
+  validateSafeHttpUrl,
 } from '../types/ads';
 
 export { type ApiCallResult, type TokenGetter, isJsonContentType, resolveApiUrl };
@@ -85,12 +87,16 @@ function mapDocToAd(
 ): AdRecord {
   const rawType = String(d.adType || 'banner') as AdType;
   const placementId = String(d.placementId || '');
+  const scriptCode = String(d.scriptCode || '');
   return {
     id,
     name: String(d.name || ''),
-    provider: String(d.provider || ''),
+    provider: String(d.provider || detectAdProvider(scriptCode)),
     adType: BUILT_IN_AD_TYPES.includes(rawType) ? rawType : 'banner',
-    scriptCode: String(d.scriptCode || ''),
+    scriptCode,
+    destinationUrl: validateSafeHttpUrl(
+      typeof d.destinationUrl === 'string' ? d.destinationUrl : ''
+    ).sanitized,
     placementId,
     placementName:
       placementNameMap?.get(placementId) || String(d.placementName || d.placement || ''),
@@ -232,6 +238,7 @@ async function syncClientPublicAdSlot(
     provider: ad.provider,
     adType: ad.adType,
     scriptCode: ad.scriptCode,
+    destinationUrl: validateSafeHttpUrl(ad.destinationUrl).sanitized,
     width: effectiveWidth,
     height: effectiveHeight,
     priority: ad.priority,
@@ -532,14 +539,14 @@ export async function createAdvertisement(
   payload: AdPayload,
   getIdToken?: TokenGetter
 ): Promise<AdRecord> {
-  const check = validateAdPayload(payload);
-  if (!check.valid || !check.sanitized) {
-    throw new Error(check.error || 'Invalid advertisement configuration.');
+  const preCheck = validateAdPayload(payload);
+  if (!preCheck.valid || !preCheck.sanitized) {
+    throw new Error(preCheck.error || 'Invalid advertisement configuration.');
   }
 
   const apiResult = await callJsonApiWithFallback<{ ad?: AdRecord }>('/api/admin/ads', {
     method: 'POST',
-    body: check.sanitized,
+    body: preCheck.sanitized,
     requireAuth: true,
     getIdToken,
   });
@@ -556,12 +563,12 @@ export async function createAdvertisement(
 
   let placementSnap;
   try {
-    placementSnap = await getDoc(doc(firestoreDb, 'adPlacements', check.sanitized.placementId));
+    placementSnap = await getDoc(doc(firestoreDb, 'adPlacements', preCheck.sanitized.placementId));
   } catch (err) {
     handleFirestoreError(
       err,
       OperationType.GET,
-      `adPlacements/${check.sanitized.placementId}`
+      `adPlacements/${preCheck.sanitized.placementId}`
     );
   }
 
@@ -575,6 +582,8 @@ export async function createAdvertisement(
     placementSnap.id,
     placementSnap.data() as Record<string, unknown>
   );
+  const check = validateAdPayload(payload, { placementName: placement.name });
+  const sanitized = check.sanitized || preCheck.sanitized;
 
   const adId = `ad_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const adRef = doc(firestoreDb, 'ads', adId);
@@ -582,7 +591,7 @@ export async function createAdvertisement(
   try {
     await setDoc(adRef, {
       id: adId,
-      ...check.sanitized,
+      ...sanitized,
       placementName: placement.name,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
@@ -599,7 +608,7 @@ export async function createAdvertisement(
       ? mapDocToAd(savedSnap.id, savedSnap.data() as Record<string, unknown>)
       : {
           id: adId,
-          ...check.sanitized,
+          ...sanitized,
           placementName: placement.name,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -651,11 +660,29 @@ export async function updateAdvertisement(
   }
 
   const existingAd = mapDocToAd(existingSnap.id, existingSnap.data() as Record<string, unknown>);
+  const scriptChanged =
+    typeof updates.scriptCode === 'string' &&
+    updates.scriptCode.trim() !== existingAd.scriptCode.trim();
+
   const merged: AdPayload = {
-    name: updates.name ?? existingAd.name,
-    provider: updates.provider ?? existingAd.provider,
+    name:
+      updates.name !== undefined
+        ? updates.name
+        : scriptChanged
+          ? ''
+          : existingAd.name,
+    provider:
+      updates.provider !== undefined
+        ? updates.provider
+        : scriptChanged
+          ? ''
+          : existingAd.provider,
     adType: updates.adType ?? existingAd.adType,
     scriptCode: updates.scriptCode ?? existingAd.scriptCode,
+    destinationUrl:
+      updates.destinationUrl !== undefined
+        ? updates.destinationUrl
+        : existingAd.destinationUrl,
     placementId: updates.placementId ?? existingAd.placementId,
     width: updates.width ?? existingAd.width,
     height: updates.height ?? existingAd.height,
@@ -663,19 +690,19 @@ export async function updateAdvertisement(
     priority: updates.priority ?? existingAd.priority,
   };
 
-  const check = validateAdPayload(merged);
-  if (!check.valid || !check.sanitized) {
-    throw new Error(check.error || 'Invalid advertisement update.');
+  const preCheck = validateAdPayload(merged);
+  if (!preCheck.valid || !preCheck.sanitized) {
+    throw new Error(preCheck.error || 'Invalid advertisement update.');
   }
 
   let placementSnap;
   try {
-    placementSnap = await getDoc(doc(firestoreDb, 'adPlacements', check.sanitized.placementId));
+    placementSnap = await getDoc(doc(firestoreDb, 'adPlacements', preCheck.sanitized.placementId));
   } catch (err) {
     handleFirestoreError(
       err,
       OperationType.GET,
-      `adPlacements/${check.sanitized.placementId}`
+      `adPlacements/${preCheck.sanitized.placementId}`
     );
   }
 
@@ -687,10 +714,12 @@ export async function updateAdvertisement(
     placementSnap.id,
     placementSnap.data() as Record<string, unknown>
   );
+  const check = validateAdPayload(merged, { placementName: placement.name });
+  const sanitized = check.sanitized || preCheck.sanitized;
 
   try {
     await updateDoc(adRef, {
-      ...check.sanitized,
+      ...sanitized,
       placementName: placement.name,
       updatedAt: serverTimestamp(),
       updatedByUid: uid,
@@ -706,7 +735,7 @@ export async function updateAdvertisement(
       ? mapDocToAd(savedSnap.id, savedSnap.data() as Record<string, unknown>)
       : {
           ...existingAd,
-          ...check.sanitized,
+          ...sanitized,
           placementName: placement.name,
           updatedAt: new Date().toISOString(),
           updatedByUid: uid,
@@ -810,12 +839,16 @@ export async function fetchPublicActiveAds(): Promise<ActiveAdState> {
         });
       }
 
+      const scriptCode = String(data.scriptCode || '');
       ads.push({
         id: String(data.adId || d.id),
         name: String(data.name || ''),
-        provider: String(data.provider || ''),
+        provider: String(data.provider || detectAdProvider(scriptCode)),
         adType,
-        scriptCode: String(data.scriptCode || ''),
+        scriptCode,
+        destinationUrl: validateSafeHttpUrl(
+          typeof data.destinationUrl === 'string' ? data.destinationUrl : ''
+        ).sanitized,
         placementId,
         placementName: String(data.placementName || placementId),
         width: typeof data.width === 'string' && data.width.trim() ? data.width.trim() : 'auto',

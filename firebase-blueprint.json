@@ -457,6 +457,10 @@
           "minLength": 5,
           "maxLength": 50000
         },
+        "destinationUrl": {
+          "type": "string",
+          "maxLength": 2000
+        },
         "placementId": {
           "type": "string",
           "minLength": 1,
@@ -592,6 +596,10 @@
           "type": "string",
           "minLength": 5,
           "maxLength": 50000
+        },
+        "destinationUrl": {
+          "type": "string",
+          "maxLength": 2000
         },
         "width": {
           "type": "string",

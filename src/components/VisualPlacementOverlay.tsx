@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   CheckCircle2,
   Crosshair,
   ExternalLink,
+  Eye,
   Layers,
   MousePointerClick,
   RefreshCw,
@@ -13,22 +15,25 @@ import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
 import {
   SelectedPlacementTarget,
+  readPendingAdDraft,
   usePlacementSelector,
 } from '../context/PlacementSelectorContext';
 import {
   AD_TYPES,
   AdInsertPosition,
+  AdRecord,
   AdStatus,
   AdType,
   DIMENSION_PRESETS,
   VisualPlacementRecord,
+  detectAdProvider,
   formatReadableError,
   getAdTypeLabel,
   normalizePageRoute,
   normalizeSlotIdentifier,
 } from '../types/ads';
 import { createVisualPlacement } from '../lib/adsPersistence';
-import { notifyActiveAdsUpdated } from './AdSlot';
+import { AdSlot, notifyActiveAdsUpdated } from './AdSlot';
 
 interface BoxRect {
   top: number;
@@ -216,6 +221,8 @@ export function VisualPlacementOverlay() {
   const [saving, setSaving] = useState(false);
   const [savedPlacement, setSavedPlacement] = useState<VisualPlacementRecord | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [previewInPlace, setPreviewInPlace] = useState(false);
+  const [previewHost, setPreviewHost] = useState<HTMLDivElement | null>(null);
 
   const savingRef = useRef(false);
   const lastTapRef = useRef<{ el: HTMLElement; time: number; x: number; y: number } | null>(
@@ -232,7 +239,38 @@ export function VisualPlacementOverlay() {
     clearSelectedTarget();
     setSavedPlacement(null);
     setSaveError(null);
+    setPreviewInPlace(false);
   }, [location.pathname, clearSelectedTarget]);
+
+  // Mount/unmount in-place preview portal inside selected page element
+  useEffect(() => {
+    if (!previewInPlace || !savedPlacement || !selectedTarget?.element?.isConnected) {
+      setPreviewHost(null);
+      return;
+    }
+    const host = document.createElement('div');
+    host.setAttribute('data-ad-overlay', 'true');
+    host.className = 'w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 my-4';
+    const insertTarget =
+      savedPlacement.position === 'before'
+        ? 'beforebegin'
+        : savedPlacement.position === 'inside'
+          ? 'beforeend'
+          : 'afterend';
+    if (insertTarget === 'beforeend') {
+      host.className = 'w-full my-3';
+    }
+    selectedTarget.element.insertAdjacentElement(insertTarget, host);
+    setPreviewHost(host);
+    return () => {
+      try {
+        host.remove();
+      } catch {
+        // Ignore cleanup errors
+      }
+      setPreviewHost(null);
+    };
+  }, [previewInPlace, savedPlacement, selectedTarget]);
 
   // Keep selected and hovered highlight outlines locked during scroll or resize
   useEffect(() => {
@@ -423,8 +461,69 @@ export function VisualPlacementOverlay() {
   const selectedDimensionPresetKey =
     DIMENSION_PRESETS.find((p) => p.width === width && p.height === height)?.key || 'custom';
 
+  const pendingDraft = readPendingAdDraft();
+
+  const buildReturnUrlWithPlacement = (placementId?: string) => {
+    const base = pendingDraft?.returnTo || '/admin/ads';
+    if (!placementId) return base;
+    const sep = base.includes('?') ? '&' : '?';
+    return `${base}${sep}placementId=${encodeURIComponent(placementId)}`;
+  };
+
+  const inPlacePreviewAd: AdRecord | null =
+    previewHost && savedPlacement && pendingDraft?.scriptCode.trim()
+      ? {
+          id: `overlay_preview_${savedPlacement.id}`,
+          name: `${detectAdProvider(pendingDraft.scriptCode)} · ${savedPlacement.name}`,
+          provider: detectAdProvider(pendingDraft.scriptCode),
+          adType: pendingDraft.adType || savedPlacement.adType,
+          scriptCode: pendingDraft.scriptCode,
+          destinationUrl: pendingDraft.destinationUrl,
+          placementId: savedPlacement.id,
+          placementName: savedPlacement.name,
+          width:
+            pendingDraft.width && pendingDraft.width !== 'auto'
+              ? pendingDraft.width
+              : savedPlacement.width,
+          height:
+            pendingDraft.height && pendingDraft.height !== 'auto'
+              ? pendingDraft.height
+              : savedPlacement.height,
+          status: 'active',
+          priority: pendingDraft.priority || 10,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }
+      : null;
+
   return (
     <>
+      {previewHost &&
+        savedPlacement &&
+        createPortal(
+          <div data-ad-overlay="true" className="w-full">
+            {inPlacePreviewAd ? (
+              <AdSlot
+                placementId={savedPlacement.id}
+                placementName={savedPlacement.name}
+                testMode
+                adOverride={inPlacePreviewAd}
+              />
+            ) : (
+              <div className="rounded-2xl border-2 border-dashed border-[#2A9D8F] bg-[#FAF7F2]/95 p-4 text-center space-y-1">
+                <p className="text-xs font-bold text-[#264653]">
+                  Selected Placement Area: {savedPlacement.name}
+                </p>
+                <p className="text-[11px] font-mono text-[#264653]/70">
+                  {getAdTypeLabel(savedPlacement.adType)} · {savedPlacement.position.toUpperCase()} ·{' '}
+                  {savedPlacement.width} × {savedPlacement.height}
+                </p>
+              </div>
+            )}
+          </div>,
+          previewHost
+        )}
+
       {/* Soft Hover / First-Tap Highlight Box (Teal) */}
       {isSelectablePage && hoveredRect && (!selectedTarget || hoveredElement !== selectedTarget.element) && (
         <div
@@ -480,8 +579,9 @@ export function VisualPlacementOverlay() {
             <button
               type="button"
               onClick={() => {
+                const targetUrl = buildReturnUrlWithPlacement(savedPlacement?.id);
                 exitSelectionMode();
-                navigate('/admin/ads');
+                navigate(targetUrl);
               }}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#E76F51] hover:bg-[#D05A3C] text-white text-xs font-semibold transition-colors min-h-[34px]"
             >
@@ -549,7 +649,7 @@ export function VisualPlacementOverlay() {
                   </div>
                   <div>
                     <p className="text-xs font-semibold text-[#2A9D8F]">
-                      Placement Saved
+                      Placement Saved to Firebase
                     </p>
                     <h3 className="text-base font-bold text-[#264653]">
                       {savedPlacement.name}
@@ -558,7 +658,10 @@ export function VisualPlacementOverlay() {
                 </div>
                 <button
                   type="button"
-                  onClick={clearSelectedTarget}
+                  onClick={() => {
+                    setPreviewInPlace(false);
+                    clearSelectedTarget();
+                  }}
                   aria-label="Close panel"
                   className="p-1.5 rounded-lg text-[#264653]/60 hover:bg-[#F4EDE4]"
                 >
@@ -588,22 +691,41 @@ export function VisualPlacementOverlay() {
                 </p>
               </div>
 
+              <button
+                type="button"
+                onClick={() => setPreviewInPlace((v) => !v)}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-[#F4EDE4] hover:bg-[#E8DEC8] text-[#264653] text-xs font-semibold min-h-[38px]"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>
+                  {previewInPlace
+                    ? 'Hide Area Preview on Page'
+                    : pendingDraft?.scriptCode.trim()
+                      ? 'Preview Your Draft Ad Inside This Area'
+                      : 'Preview Slot Area on Page'}
+                </span>
+              </button>
+
               <div className="flex flex-wrap items-center gap-2.5 pt-1">
                 <button
                   type="button"
                   onClick={() => {
-                    const id = savedPlacement.id;
+                    const targetUrl = buildReturnUrlWithPlacement(savedPlacement.id);
+                    setPreviewInPlace(false);
                     exitSelectionMode();
-                    navigate(`/admin/ads?placementId=${encodeURIComponent(id)}`);
+                    navigate(targetUrl);
                   }}
                   className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[#E76F51] hover:bg-[#D05A3C] text-white text-xs font-semibold min-h-[42px]"
                 >
-                  <span>Create Ad Here</span>
+                  <span>
+                    {pendingDraft ? 'Use Placement in Ad Form' : 'Create Ad Here'}
+                  </span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </button>
                 <button
                   type="button"
                   onClick={() => {
+                    setPreviewInPlace(false);
                     clearSelectedTarget();
                     setSavedPlacement(null);
                   }}

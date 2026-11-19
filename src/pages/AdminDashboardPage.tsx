@@ -559,7 +559,6 @@ export function AdminDashboardPage() {
           imageUrl: nextImageUrl,
           aspectRatio: editPromptForm.aspectRatio,
           title: editPromptForm.title.trim(),
-          promptText: editPromptForm.promptText.trim(),
           status: editPromptForm.status,
           updatedAt: serverTimestamp(),
         });

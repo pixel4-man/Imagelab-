@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { useAuth } from './AuthContext';
-import { AdInsertPosition } from '../types/ads';
+import { AdInsertPosition, AdStatus, AdType } from '../types/ads';
 
 export interface SelectedPlacementTarget {
   pageRoute: string;
@@ -10,6 +10,18 @@ export interface SelectedPlacementTarget {
   suggestedName: string;
   position: AdInsertPosition;
   element: HTMLElement | null;
+}
+
+export interface PendingAdFormDraft {
+  editingAdId: string | null;
+  adType: AdType;
+  width: string;
+  height: string;
+  status: AdStatus;
+  priority: number;
+  scriptCode: string;
+  destinationUrl: string;
+  returnTo: string;
 }
 
 interface PlacementSelectorContextValue {
@@ -23,6 +35,47 @@ interface PlacementSelectorContextValue {
 }
 
 const STORAGE_SELECTION_KEY = 'imagelab_visual_placement_mode_v1';
+const STORAGE_PENDING_AD_DRAFT_KEY = 'imagelab_pending_ad_draft_v1';
+
+export function savePendingAdDraft(draft: PendingAdFormDraft): void {
+  try {
+    sessionStorage.setItem(STORAGE_PENDING_AD_DRAFT_KEY, JSON.stringify(draft));
+  } catch {
+    // Ignore storage quota or private mode restrictions
+  }
+}
+
+export function readPendingAdDraft(): PendingAdFormDraft | null {
+  try {
+    const raw = sessionStorage.getItem(STORAGE_PENDING_AD_DRAFT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PendingAdFormDraft>;
+    return {
+      editingAdId: typeof parsed.editingAdId === 'string' ? parsed.editingAdId : null,
+      adType: parsed.adType || 'responsive_banner',
+      width: typeof parsed.width === 'string' ? parsed.width : 'auto',
+      height: typeof parsed.height === 'string' ? parsed.height : 'auto',
+      status: parsed.status === 'disabled' ? 'disabled' : 'active',
+      priority: typeof parsed.priority === 'number' ? parsed.priority : 10,
+      scriptCode: typeof parsed.scriptCode === 'string' ? parsed.scriptCode : '',
+      destinationUrl: typeof parsed.destinationUrl === 'string' ? parsed.destinationUrl : '',
+      returnTo:
+        typeof parsed.returnTo === 'string' && parsed.returnTo.startsWith('/')
+          ? parsed.returnTo
+          : '/admin/ads',
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingAdDraft(): void {
+  try {
+    sessionStorage.removeItem(STORAGE_PENDING_AD_DRAFT_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 const PlacementSelectorContext = createContext<PlacementSelectorContextValue | null>(null);
 

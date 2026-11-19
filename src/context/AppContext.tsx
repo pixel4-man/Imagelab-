@@ -16,6 +16,7 @@ interface AppContextValue {
   likedIds: string[];
   savedIds: string[];
   copiedId: string | null;
+  unlockedPrompts: Record<string, string>;
   toast: ToastState | null;
   activeUserProfile: CreatorProfile;
   getCreator: (username: string) => CreatorProfile;
@@ -108,10 +109,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   });
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [unlockedPrompts, setUnlockedPrompts] = useState<Record<string, string>>({});
   const [toast, setToast] = useState<ToastState | null>(null);
   const [activeUserProfile, setActiveUserProfile] = useState<CreatorProfile>(CREATORS.elenavance);
   const [likeDeltas, setLikeDeltas] = useState<Record<string, number>>({});
   const [copyDeltas, setCopyDeltas] = useState<Record<string, number>>({});
+
+  useEffect(() => {
+    if (!firebaseUser) {
+      setUnlockedPrompts({});
+    }
+  }, [firebaseUser]);
 
   const refreshPublicPrompts = useCallback(async () => {
     try {
@@ -122,7 +130,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const sanitized: PromptItem[] = data.prompts.map((item) => ({
           id: String(item.id),
           title: String(item.title || 'Untitled Artwork'),
-          promptText: typeof item.promptText === 'string' ? item.promptText : '',
           imageUrl: String(item.imageUrl || '/src/assets/images/art_digital_dreamscape_1794836302512.jpg'),
           aspectRatio: (['16:9', '4:3', '3:4', '1:1'].includes(item.aspectRatio)
             ? item.aspectRatio
@@ -165,8 +172,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const unsub = onSnapshot(
       approvedQuery,
       (snap) => {
-        setFirestoreApprovedPrompts((prev) => {
-          const prevTextMap = new Map(prev.map((p) => [p.id, p.promptText || '']));
+        setFirestoreApprovedPrompts(() => {
           const mapped: PromptItem[] = snap.docs.map((docSnap) => {
             const d = docSnap.data();
             const aspect = (['16:9', '4:3', '3:4', '1:1'].includes(d.aspectRatio)
@@ -176,10 +182,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             return {
               id: docSnap.id,
               title: String(d.title || 'Untitled Artwork'),
-              promptText:
-                (typeof d.promptText === 'string' && d.promptText) ||
-                prevTextMap.get(docSnap.id) ||
-                '',
               imageUrl: String(d.imageUrl || '/src/assets/images/art_digital_dreamscape_1794836302512.jpg'),
               aspectRatio: aspect,
               creatorUsername: String(d.authorUsername || 'contributor'),
@@ -314,44 +316,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const copyPrompt = async (id: string): Promise<boolean> => {
+    if (!firebaseUser) {
+      return false;
+    }
+
     try {
-      const target =
-        prompts.find((item) => item.id === id) ||
-        sessionPrompts.find((item) => item.id === id);
-      let promptText = target?.promptText || '';
+      let promptText = unlockedPrompts[id] || '';
 
       if (!promptText) {
-        try {
-          const pubRes = await fetch(`/api/prompts/public/${encodeURIComponent(id)}`, {
-            cache: 'no-store',
-          });
-          if (pubRes.ok) {
-            const pubData = (await pubRes.json()) as { prompt?: PromptItem };
-            if (typeof pubData.prompt?.promptText === 'string') {
-              promptText = pubData.prompt.promptText;
-            }
-          }
-        } catch {
-          // Fallback below
-        }
-      }
-
-      if (!promptText && firebaseUser) {
         const token = await getIdToken();
-        if (token) {
-          const res = await fetch(`/api/prompts/${encodeURIComponent(id)}/secret`, {
-            headers: { Authorization: `Bearer ${token}` },
-            cache: 'no-store',
-          });
-          if (res.ok) {
-            const data = (await res.json()) as { promptText?: string };
-            promptText = typeof data.promptText === 'string' ? data.promptText : '';
-          } else if (res.status === 503 && db) {
-            const secretSnap = await getDoc(doc(db, 'promptSecrets', id));
-            if (secretSnap.exists() && typeof secretSnap.data()?.promptText === 'string') {
-              promptText = secretSnap.data().promptText;
-            }
+        if (!token) {
+          showToast('Please sign in again to copy the full prompt.', 'terracotta');
+          return false;
+        }
+        const res = await fetch(`/api/prompts/${encodeURIComponent(id)}/secret`, {
+          headers: { Authorization: `Bearer ${token}` },
+          cache: 'no-store',
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { promptText?: string };
+          promptText = typeof data.promptText === 'string' ? data.promptText : '';
+        } else if (res.status === 503 && db) {
+          const secretSnap = await getDoc(doc(db, 'promptSecrets', id));
+          if (secretSnap.exists() && typeof secretSnap.data()?.promptText === 'string') {
+            promptText = secretSnap.data().promptText;
           }
+        } else {
+          const payload = await res.json().catch(() => ({}));
+          showToast(payload.error || 'Unable to unlock prompt right now.', 'terracotta');
+          return false;
         }
       }
 
@@ -361,20 +354,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       await writeTextToClipboard(promptText);
+      setUnlockedPrompts((prev) => ({ ...prev, [id]: promptText }));
       setCopiedId(id);
       setCopyDeltas((current) => ({
         ...current,
         [id]: (current[id] || 0) + 1,
       }));
-      showToast('Prompt copied!', 'teal');
-
-      fetch(`/api/prompts/${encodeURIComponent(id)}/copy`, {
-        method: 'POST',
-      }).catch(() => {});
+      showToast('Prompt copied successfully', 'teal');
 
       window.setTimeout(() => {
         setCopiedId((current) => (current === id ? null : current));
-      }, 2200);
+      }, 2400);
       return true;
     } catch {
       showToast('Clipboard access blocked. Please allow clipboard permissions and try again.', 'terracotta');
@@ -395,7 +385,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const newItem: PromptItem = {
       id: `${slug || 'creation'}-${Date.now()}`,
       title: item.title,
-      promptText: item.promptText || '',
       imageUrl: item.imageUrl,
       aspectRatio: item.aspectRatio,
       authorUid: item.authorUid,
@@ -443,6 +432,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         likedIds,
         savedIds,
         copiedId,
+        unlockedPrompts,
         toast,
         activeUserProfile,
         getCreator,

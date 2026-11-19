@@ -1,27 +1,48 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActiveAdState, fetchPublicActiveAds } from '../lib/adsPersistence';
-import { AdRecord, normalizePageRoute } from '../types/ads';
+import { buildSandboxedAdSrcDoc } from '../lib/adFrameHtml';
+import {
+  AdRecord,
+  hasOwnInteractiveOrScriptElements,
+  normalizePageRoute,
+  validateSafeHttpUrl,
+} from '../types/ads';
 
+export { buildSandboxedAdSrcDoc };
 export const ADS_UPDATED_EVENT = 'imagelab-ads-updated';
+const ADS_STORAGE_SYNC_KEY = 'imagelab_ads_sync_ts';
 export type { ActiveAdState };
 
+export type AdRenderStatus = 'loading' | 'loaded' | 'empty' | 'error' | 'popunder_ready';
+
 let cachedActiveState: ActiveAdState | null = null;
+let cachedAt = 0;
 let inflightStateRequest: Promise<ActiveAdState> | null = null;
+const CACHE_TTL_MS = 15_000;
 
 export function notifyActiveAdsUpdated() {
   cachedActiveState = null;
+  cachedAt = 0;
   inflightStateRequest = null;
+  try {
+    localStorage.setItem(ADS_STORAGE_SYNC_KEY, String(Date.now()));
+  } catch {
+    // Ignore storage errors
+  }
   window.dispatchEvent(new CustomEvent(ADS_UPDATED_EVENT));
 }
 
 // Queries /api/ads/active first, with active-only Firestore publicAdSlots fallback on static hosts
-export async function fetchActiveAdState(): Promise<ActiveAdState> {
-  if (cachedActiveState) return cachedActiveState;
-  if (inflightStateRequest) return inflightStateRequest;
+export async function fetchActiveAdState(forceFresh = false): Promise<ActiveAdState> {
+  if (!forceFresh && cachedActiveState && Date.now() - cachedAt < CACHE_TTL_MS) {
+    return cachedActiveState;
+  }
+  if (!forceFresh && inflightStateRequest) return inflightStateRequest;
 
   inflightStateRequest = fetchPublicActiveAds()
     .then((next) => {
       cachedActiveState = next;
+      cachedAt = Date.now();
       return next;
     })
     .catch(() => ({ placements: [], ads: [] }) as ActiveAdState)
@@ -43,60 +64,19 @@ export function matchesPlacementRoute(pattern: string, currentPath: string): boo
   return false;
 }
 
-function buildSandboxedAdSrcDoc(ad: AdRecord): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<style>
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0;
-    padding: 0;
-    background: transparent;
-    color: #264653;
-    font-family: 'DM Sans', system-ui, -apple-system, sans-serif;
-    overflow-x: hidden;
-  }
-  .ad-root {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 56px;
-  }
-  img, iframe, ins {
-    max-width: 100%;
-  }
-</style>
-</head>
-<body>
-  <div class="ad-root" id="ad-root">${ad.scriptCode}</div>
-  <script>
-    (function () {
-      function reportHeight() {
-        var h = Math.max(
-          document.body ? document.body.scrollHeight : 0,
-          document.documentElement ? document.documentElement.scrollHeight : 0
-        );
-        if (window.parent && h > 0) {
-          window.parent.postMessage({ type: 'imagelab-ad-resize', id: ${JSON.stringify(ad.id)}, height: h }, '*');
-        }
-      }
-      window.addEventListener('load', reportHeight);
-      setTimeout(reportHeight, 120);
-      setTimeout(reportHeight, 600);
-      if (typeof ResizeObserver !== 'undefined' && document.body) {
-        new ResizeObserver(reportHeight).observe(document.body);
-      }
-    })();
-  </script>
-</body>
-</html>`;
-}
+export function SandboxedAdFrame({
+  ad,
+  testMode = false,
+  onStatusChange,
+}: {
+  ad: AdRecord;
+  testMode?: boolean;
+  onStatusChange?: (status: AdRenderStatus, message?: string) => void;
+}) {
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const onStatusRef = useRef(onStatusChange);
+  onStatusRef.current = onStatusChange;
 
-export function SandboxedAdFrame({ ad }: { ad: AdRecord }) {
   const [autoHeight, setAutoHeight] = useState<number>(() => {
     if (ad.height !== 'auto') {
       const parsed = parseInt(ad.height, 10);
@@ -113,20 +93,34 @@ export function SandboxedAdFrame({ ad }: { ad: AdRecord }) {
       if (Number.isFinite(parsed) && parsed > 0) {
         setAutoHeight(parsed);
       }
-      return;
     }
+    onStatusRef.current?.('loading');
+  }, [ad.id, ad.scriptCode, ad.destinationUrl, ad.height, ad.width, ad.adType]);
 
+  useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      const data = event.data as { type?: string; id?: string; height?: number } | null;
+      if (iframeRef.current?.contentWindow && event.source !== iframeRef.current.contentWindow) {
+        return;
+      }
+      const data = event.data as {
+        type?: string;
+        id?: string;
+        status?: AdRenderStatus;
+        height?: number;
+        message?: string;
+      } | null;
+      if (!data || data.type !== 'imagelab-ad-status' || data.id !== ad.id) return;
+
       if (
-        data &&
-        data.type === 'imagelab-ad-resize' &&
-        data.id === ad.id &&
+        ad.height === 'auto' &&
         typeof data.height === 'number' &&
-        data.height >= 40 &&
+        data.height >= 24 &&
         data.height <= 900
       ) {
         setAutoHeight(Math.ceil(data.height));
+      }
+      if (data.status) {
+        onStatusRef.current?.(data.status, data.message);
       }
     };
     window.addEventListener('message', onMessage);
@@ -140,12 +134,16 @@ export function SandboxedAdFrame({ ad }: { ad: AdRecord }) {
       ? '100%'
       : ad.width;
 
+  const frameKey = `${ad.id}:${ad.adType}:${ad.width}:${ad.height}:${ad.destinationUrl || ''}:${ad.scriptCode.length}`;
+
   return (
     <iframe
-      title={`Sponsored: ${ad.name}`}
+      key={frameKey}
+      ref={iframeRef}
+      title={`Advertisement: ${ad.name}`}
       srcDoc={srcDoc}
       sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
-      loading="lazy"
+      loading="eager"
       scrolling="no"
       style={{
         width: frameWidth,
@@ -157,6 +155,62 @@ export function SandboxedAdFrame({ ad }: { ad: AdRecord }) {
         overflow: 'hidden',
       }}
     />
+  );
+}
+
+/**
+ * Renders an active public advertisement safely and collapses cleanly
+ * whenever no fill / error / zero output occurs so empty boxes never appear.
+ */
+export function LivePublicAdItem({
+  ad,
+  onVisibilityChange,
+}: {
+  ad: AdRecord;
+  onVisibilityChange?: (adId: string, visible: boolean) => void;
+}) {
+  const [status, setStatus] = useState<AdRenderStatus>('loading');
+
+  const handleStatus = useCallback(
+    (nextStatus: AdRenderStatus) => {
+      setStatus(nextStatus);
+      onVisibilityChange?.(ad.id, nextStatus === 'loaded');
+    },
+    [ad.id, onVisibilityChange]
+  );
+
+  useEffect(() => {
+    onVisibilityChange?.(ad.id, false);
+    return () => onVisibilityChange?.(ad.id, false);
+  }, [ad.id, onVisibilityChange]);
+
+  if (status === 'empty' || status === 'error') {
+    return null;
+  }
+
+  const isVisible = status === 'loaded';
+
+  return (
+    <div
+      data-imagelab-ad-unit={ad.id}
+      data-ad-render-status={status}
+      className={
+        isVisible
+          ? 'rounded-2xl bg-[#FAF7F2]/92 border border-[#264653]/12 p-3 sm:p-4 overflow-hidden transition-opacity duration-200'
+          : 'h-0 overflow-hidden opacity-0 pointer-events-none m-0 p-0 border-0'
+      }
+      aria-hidden={!isVisible}
+    >
+      {isVisible && (
+        <div className="flex items-center justify-between gap-2 mb-2 px-1">
+          <span className="text-[11px] font-mono text-[#264653]/55">Advertisement</span>
+          <span className="text-[11px] font-mono text-[#264653]/45 truncate">
+            {ad.provider}
+          </span>
+        </div>
+      )}
+      <SandboxedAdFrame ad={ad} onStatusChange={handleStatus} />
+    </div>
   );
 }
 
@@ -175,27 +229,78 @@ export function AdSlot({
   testMode = false,
   adOverride = null,
 }: AdSlotProps) {
+  const [status, setStatus] = useState<AdRenderStatus>('loading');
+  const [errorMessage, setErrorMessage] = useState<string>('');
+
+  const handleStatus = useCallback((nextStatus: AdRenderStatus, msg?: string) => {
+    setStatus(nextStatus);
+    setErrorMessage(msg || '');
+  }, []);
+
   if (!adOverride) return null;
+
+  if (!testMode) {
+    return <LivePublicAdItem ad={adOverride} />;
+  }
+
+  const hasDest = Boolean(validateSafeHttpUrl(adOverride.destinationUrl).sanitized);
+  const ownsClickables = hasOwnInteractiveOrScriptElements(adOverride.scriptCode);
 
   return (
     <aside
-      aria-label="Advertisement"
+      aria-label="Advertisement Preview"
       data-ad-placement-id={placementId || adOverride.placementId}
-      data-ad-test-mode={testMode ? 'true' : 'false'}
+      data-ad-test-mode="true"
       className={`w-full ${className}`}
     >
-      <div className="rounded-2xl bg-[#FAF7F2]/92 border border-[#264653]/12 p-3 sm:p-4 overflow-hidden">
-        <div className="flex items-center justify-between gap-2 mb-2 px-1">
-          <span className="text-[11px] font-mono text-[#264653]/55">
-            {testMode
-              ? `Preview Test Mode · Impressions Disabled${placementName ? ` · ${placementName}` : ''}`
-              : 'Advertisement'}
+      <div className="rounded-2xl bg-[#FAF7F2] border border-[#264653]/14 p-3 sm:p-4 overflow-hidden space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+          <span className="text-[11px] font-mono text-[#264653]/65">
+            Preview Test Mode · {adOverride.width} × {adOverride.height}
+            {placementName ? ` · ${placementName}` : ''}
           </span>
-          <span className="text-[11px] font-mono text-[#264653]/45 truncate">
+          <span className="text-[11px] font-mono text-[#2A9D8F] font-semibold">
             {adOverride.provider}
           </span>
         </div>
-        <SandboxedAdFrame ad={adOverride} />
+
+        <div className="rounded-xl bg-white/75 border border-[#264653]/10 p-2 overflow-x-auto">
+          <SandboxedAdFrame ad={adOverride} testMode onStatusChange={handleStatus} />
+        </div>
+
+        {status === 'loading' && (
+          <p className="text-[11px] text-[#264653]/60 px-1">
+            Rendering isolated preview inside sandboxed container...
+          </p>
+        )}
+
+        {status === 'loaded' && (
+          <p className="text-[11px] text-[#2A9D8F] font-medium px-1">
+            Creative rendered inside sandboxed iframe
+            {hasDest && !ownsClickables
+              ? ' · Clicking banner opens Destination URL in new tab.'
+              : hasDest && ownsClickables
+                ? ' · Snippet already contains links/scripts; original click behavior preserved.'
+                : '.'}
+          </p>
+        )}
+
+        {status === 'popunder_ready' && (
+          <p className="text-[11px] text-[#264653]/75 font-medium px-1">
+            Popunder script loaded without errors (popunder creatives do not render a visible banner box).
+          </p>
+        )}
+
+        {(status === 'error' || status === 'empty') && (
+          <div
+            role="alert"
+            className="rounded-xl bg-[#E76F51]/10 border border-[#E76F51]/35 px-3 py-2 text-xs text-[#9A3412]"
+          >
+            <strong>Preview Error:</strong>{' '}
+            {errorMessage ||
+              'The submitted ad script or snippet could not render visible content (check script tags, external URL reachability, or ad-blocker rules).'}
+          </div>
+        )}
       </div>
     </aside>
   );

@@ -60,6 +60,7 @@ export interface AdRecord {
   provider: string;
   adType: AdType;
   scriptCode: string;
+  destinationUrl?: string;
   placementId: string;
   placementName?: string;
   width: string;
@@ -72,10 +73,11 @@ export interface AdRecord {
 }
 
 export interface AdPayload {
-  name: string;
-  provider: string;
+  name?: string;
+  provider?: string;
   adType: AdType;
   scriptCode: string;
+  destinationUrl?: string;
   placementId: string;
   width: string;
   height: string;
@@ -105,6 +107,155 @@ export function normalizePageRoute(raw?: string): string {
   if (!cleaned.startsWith('/')) return `/${cleaned}`.slice(0, 200);
   if (cleaned.length > 1 && cleaned.endsWith('/')) return cleaned.slice(0, -1).slice(0, 200);
   return cleaned.slice(0, 200) || '/';
+}
+
+export function validateSafeHttpUrl(raw?: string): {
+  valid: boolean;
+  sanitized: string;
+  error?: string;
+} {
+  if (raw === undefined || raw === null) {
+    return { valid: true, sanitized: '' };
+  }
+  if (typeof raw !== 'string') {
+    return { valid: false, sanitized: '', error: 'Destination URL must be text.' };
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { valid: true, sanitized: '' };
+  }
+  if (trimmed.length > 2000) {
+    return { valid: false, sanitized: '', error: 'Destination URL must be 2,000 characters or fewer.' };
+  }
+  // Reject control characters or whitespace inside URL
+  if (/[\u0000-\u001F\u007F\s]/.test(trimmed)) {
+    return {
+      valid: false,
+      sanitized: '',
+      error: 'Destination URL cannot contain spaces or control characters.',
+    };
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return {
+        valid: false,
+        sanitized: '',
+        error: 'Destination URL must start with http:// or https://.',
+      };
+    }
+    if (!parsed.hostname) {
+      return { valid: false, sanitized: '', error: 'Destination URL must include a valid domain.' };
+    }
+    return { valid: true, sanitized: parsed.toString() };
+  } catch {
+    return {
+      valid: false,
+      sanitized: '',
+      error: 'Destination URL must be a valid http:// or https:// URL.',
+    };
+  }
+}
+
+export function detectAdProvider(scriptCode: string): string {
+  const code = (scriptCode || '').toLowerCase();
+  if (!code.trim()) return 'Custom Ad';
+
+  if (
+    code.includes('adsterra') ||
+    code.includes('highperformanceformat') ||
+    code.includes('effectivegatecpm') ||
+    code.includes('profitabledisplaynetwork') ||
+    code.includes('profitablecpmrate') ||
+    code.includes('topcreativeformat') ||
+    code.includes('toprevenuegate') ||
+    /\batoptions\b/.test(code)
+  ) {
+    return 'Adsterra';
+  }
+  if (
+    code.includes('googlesyndication') ||
+    code.includes('adsbygoogle') ||
+    code.includes('doubleclick.net') ||
+    code.includes('googletagservices')
+  ) {
+    return 'Google AdSense';
+  }
+  if (code.includes('monetag') || code.includes('alwingulla') || code.includes('thaudray')) {
+    return 'Monetag';
+  }
+  if (code.includes('propellerads') || code.includes('propeller')) {
+    return 'PropellerAds';
+  }
+  if (code.includes('media.net')) {
+    return 'Media.net';
+  }
+  if (code.includes('mgid.com') || code.includes('jsc.mgid')) {
+    return 'MGID';
+  }
+  if (code.includes('ezoic') || code.includes('ezstandalone')) {
+    return 'Ezoic';
+  }
+  if (code.includes('revcontent')) {
+    return 'Revcontent';
+  }
+  if (code.includes('amazon-adsystem')) {
+    return 'Amazon Ads';
+  }
+  if (/<script\b/i.test(code)) {
+    return 'Generic Ad Network';
+  }
+  if (/<img\b/i.test(code) || /^https?:\/\/\S+\.(png|jpe?g|webp|gif|svg)(\?\S*)?$/i.test(code.trim())) {
+    return 'Custom Banner';
+  }
+  return 'Custom Ad';
+}
+
+export function deriveInternalAdName(params: {
+  adType: AdType;
+  provider?: string;
+  placementName?: string;
+  scriptCode?: string;
+}): string {
+  const provider = (params.provider || detectAdProvider(params.scriptCode || '')).trim() || 'Custom Ad';
+  const typeLabel = getAdTypeLabel(params.adType);
+  const place = (params.placementName || '').trim();
+  const base = place ? `${provider} · ${place}` : `${provider} · ${typeLabel}`;
+  return base.slice(0, 120);
+}
+
+/**
+ * Returns true when the submitted snippet already contains interactive links,
+ * buttons, frames, or third-party scripts whose own click behavior must NOT
+ * be wrapped or intercepted by an outer Destination URL link.
+ */
+export function hasOwnInteractiveOrScriptElements(scriptCode: string): boolean {
+  const code = (scriptCode || '').trim();
+  if (!code) return false;
+  return /(<script\b|<a\b|\bhref\s*=|<button\b|<iframe\b|<area\b|<form\b|\bonclick\s*=|\batoptions\b|\badsbygoogle\b)/i.test(
+    code
+  );
+}
+
+/**
+ * Normalizes direct safe HTTP/HTTPS image URLs pasted as creative code into an <img> tag,
+ * while preserving full HTML/script snippets untouched.
+ */
+export function normalizeCreativeMarkup(scriptCode: string): string {
+  const trimmed = (scriptCode || '').trim();
+  if (!trimmed) return '';
+  if (!trimmed.includes('<') && /^https?:\/\/\S+$/i.test(trimmed)) {
+    const safeImg = validateSafeHttpUrl(trimmed);
+    if (safeImg.valid && safeImg.sanitized) {
+      const escaped = safeImg.sanitized
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      return `<img src="${escaped}" alt="Advertisement" style="max-width:100%;height:auto;display:block;margin:0 auto;border-radius:10px;" />`;
+    }
+  }
+  return trimmed;
 }
 
 export function findDuplicatePlacement<
@@ -213,13 +364,25 @@ export function validatePlacementPayload(input: Partial<VisualPlacementPayload>)
   };
 }
 
-export function validateAdPayload(input: Partial<AdPayload>): {
+export function validateAdPayload(
+  input: Partial<AdPayload>,
+  options?: { placementName?: string }
+): {
   valid: boolean;
   error?: string;
-  sanitized?: AdPayload;
+  sanitized?: {
+    name: string;
+    provider: string;
+    adType: AdType;
+    scriptCode: string;
+    destinationUrl: string;
+    placementId: string;
+    width: string;
+    height: string;
+    status: AdStatus;
+    priority: number;
+  };
 } {
-  const name = typeof input.name === 'string' ? input.name.trim() : '';
-  const provider = typeof input.provider === 'string' ? input.provider.trim() : '';
   const adType = input.adType as AdType;
   const scriptCode = typeof input.scriptCode === 'string' ? input.scriptCode.trim() : '';
   const placementId = typeof input.placementId === 'string' ? input.placementId.trim() : '';
@@ -231,18 +394,21 @@ export function validateAdPayload(input: Partial<AdPayload>): {
     ? Math.max(1, Math.min(999, Math.round(priorityNum)))
     : 10;
 
-  if (name.length < 2 || name.length > 120) {
-    return { valid: false, error: 'Advertisement name must be between 2 and 120 characters.' };
-  }
-  if (provider.length < 2 || provider.length > 80) {
-    return { valid: false, error: 'Ad provider name must be between 2 and 80 characters.' };
-  }
   if (!BUILT_IN_AD_TYPES.includes(adType)) {
     return { valid: false, error: 'Invalid advertisement type selected.' };
   }
   if (scriptCode.length < 5 || scriptCode.length > 50000) {
-    return { valid: false, error: 'Advertisement script code must be between 5 and 50,000 characters.' };
+    return {
+      valid: false,
+      error: 'Advertisement script code must be between 5 and 50,000 characters.',
+    };
   }
+
+  const destCheck = validateSafeHttpUrl(input.destinationUrl);
+  if (!destCheck.valid) {
+    return { valid: false, error: destCheck.error || 'Invalid Destination URL.' };
+  }
+
   if (!/^[a-zA-Z0-9_-]{2,128}$/.test(placementId)) {
     return {
       valid: false,
@@ -250,11 +416,32 @@ export function validateAdPayload(input: Partial<AdPayload>): {
     };
   }
   if (!/^(auto|\d+(px|%|vw)?)$/i.test(width) || width.length > 20) {
-    return { valid: false, error: 'Ad width must be "auto" or a valid CSS dimension (e.g., 728px, 100%).' };
+    return {
+      valid: false,
+      error: 'Ad width must be "auto" or a valid CSS dimension (e.g., 728px, 100%).',
+    };
   }
   if (!/^(auto|\d+(px|%|vh)?)$/i.test(height) || height.length > 20) {
-    return { valid: false, error: 'Ad height must be "auto" or a valid CSS dimension (e.g., 90px, 250px).' };
+    return {
+      valid: false,
+      error: 'Ad height must be "auto" or a valid CSS dimension (e.g., 90px, 250px).',
+    };
   }
+
+  const rawProvider = typeof input.provider === 'string' ? input.provider.trim() : '';
+  const provider = (rawProvider.length >= 2 ? rawProvider : detectAdProvider(scriptCode)).slice(0, 80);
+
+  const rawName = typeof input.name === 'string' ? input.name.trim() : '';
+  const name = (
+    rawName.length >= 2
+      ? rawName
+      : deriveInternalAdName({
+          adType,
+          provider,
+          placementName: options?.placementName,
+          scriptCode,
+        })
+  ).slice(0, 120);
 
   return {
     valid: true,
@@ -263,6 +450,7 @@ export function validateAdPayload(input: Partial<AdPayload>): {
       provider,
       adType,
       scriptCode,
+      destinationUrl: destCheck.sanitized,
       placementId,
       width,
       height,
