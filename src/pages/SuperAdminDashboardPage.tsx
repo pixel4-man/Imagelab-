@@ -155,12 +155,6 @@ export function SuperAdminDashboardPage() {
           </div>
           <div className="flex flex-wrap items-center gap-2.5 shrink-0">
             <Link
-              to="/admin/ads"
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#E76F51] hover:bg-[#D05A3C] text-white text-xs font-semibold transition-colors"
-            >
-              <span>Ads Manager</span>
-            </Link>
-            <Link
               to="/admin"
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#2A9D8F] hover:bg-[#218175] text-white text-xs font-semibold transition-colors"
             >

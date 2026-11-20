@@ -6,6 +6,9 @@ interface SafeImageProps {
   alt: string;
   className?: string;
   fallbackTitle?: string;
+  loading?: 'lazy' | 'eager';
+  decoding?: 'async' | 'sync' | 'auto';
+  draggable?: boolean;
 }
 
 export function SafeImage({
@@ -13,6 +16,9 @@ export function SafeImage({
   alt,
   className = '',
   fallbackTitle,
+  loading,
+  decoding = 'async',
+  draggable,
 }: SafeImageProps) {
   const [hasError, setHasError] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
@@ -37,6 +43,9 @@ export function SafeImage({
       src={src}
       alt={alt}
       referrerPolicy="no-referrer"
+      loading={loading}
+      decoding={decoding}
+      draggable={draggable}
       onLoad={() => setIsLoaded(true)}
       onError={() => setHasError(true)}
       className={`transition-opacity duration-300 ${

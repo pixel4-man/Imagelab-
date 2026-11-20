@@ -8,12 +8,14 @@ import {
 
 export type AdFrameRenderStatus =
   | 'loading'
+  | 'script_request_started'
   | 'script_loaded'
   | 'iframe_created'
   | 'loaded'
   | 'no_inventory'
   | 'rendering_blocked'
   | 'script_blocked'
+  | 'timeout'
   | 'error'
   | 'preview_unsupported'
   | 'popunder_ready';
@@ -118,6 +120,13 @@ export function buildSandboxedAdSrcDoc(
   const safeDest = validateSafeHttpUrl(ad.destinationUrl).sanitized;
   const hasOwnClickables = hasOwnInteractiveOrScriptElements(ad.scriptCode);
   const atMeta = extractAtOptionsMetadata(ad.scriptCode);
+  const biceaKeyMatch = (ad.scriptCode || '').match(/bicea\.org\/\d+\/([a-f0-9]{16,64})/i);
+  const resolvedZoneKey =
+    (ad.customPlacementKey && ad.customPlacementKey.trim()) ||
+    atMeta.key ||
+    (ad.id.startsWith('adsterra_zone_') ? ad.id.slice('adsterra_zone_'.length) : '') ||
+    (biceaKeyMatch ? biceaKeyMatch[1] : '') ||
+    ad.id;
 
   // Only wrap with destinationUrl when the snippet has no existing interactive/script links.
   const wrappedCreative =
@@ -180,21 +189,31 @@ export function buildSandboxedAdSrcDoc(
 <script>
   (function () {
     var adId = ${JSON.stringify(ad.id)};
+    var zoneKey = ${JSON.stringify(resolvedZoneKey)};
+    var configuredWidth = ${JSON.stringify(expectedMinWidth)};
+    var configuredHeight = ${JSON.stringify(expectedMinHeight)};
     var isPopunder = ${isPopunder ? 'true' : 'false'};
     var isHttpsParent = ${isHttps ? 'true' : 'false'};
     var providerName = ${JSON.stringify(ad.provider || 'Ad Network')};
     var atFormat = ${JSON.stringify(atMeta.format || '')};
+    var probeStartTime = Date.now();
 
     var externalScripts = [];
+    var seenScriptUrls = {};
+    var earlyScriptStates = {};
     var trackedElements = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
     var nestedFrames = [];
     var blockedResources = [];
     var runtimeErrors = [];
     var imageErrors = [];
     var sandboxErrors = [];
+    var emittedDiagnostics = {};
     var lastEmittedStatus = '';
     var hasSettledFinal = false;
+    var probeDisposed = false;
     var crossOriginSettleTimer = null;
+    var graceSettleTimer = null;
+    var headMutationObserver = null;
     var nestedBridgeSeq = 0;
 
     function isOpaqueSandboxOrigin() {
@@ -237,14 +256,83 @@ export function buildSandboxedAdSrcDoc(
       }
     }
 
+    function resolveOutcomeCategory(eventName, status) {
+      if (eventName === 'creative_rendered' || status === 'loaded' || status === 'preview_unsupported' || status === 'popunder_ready') {
+        return 'creative_rendered';
+      }
+      if (eventName === 'empty_response' || status === 'no_inventory') {
+        return 'no_inventory';
+      }
+      if (
+        eventName === 'script_failed' ||
+        eventName === 'timeout' ||
+        eventName === 'browser_restriction' ||
+        status === 'script_blocked' ||
+        status === 'rendering_blocked' ||
+        status === 'timeout' ||
+        status === 'error'
+      ) {
+        return 'blocked_rendering';
+      }
+      if (eventName === 'nested_iframe_created' || status === 'iframe_created') {
+        return 'iframe_created';
+      }
+      return 'script_loaded';
+    }
+
+    function lookupScriptResponseStatus(url) {
+      if (!url || typeof performance === 'undefined' || !performance.getEntriesByName) {
+        return '';
+      }
+      try {
+        var entries = performance.getEntriesByName(url);
+        if (entries && entries.length > 0) {
+          var last = entries[entries.length - 1];
+          if (typeof last.responseStatus === 'number' && last.responseStatus > 0) {
+            return 'HTTP ' + last.responseStatus;
+          }
+          if (typeof last.encodedBodySize === 'number' && last.encodedBodySize === 0 && typeof last.transferSize === 'number' && last.transferSize === 0) {
+            return 'opaque-no-cors';
+          }
+          return 'HTTP 200 (or opaque loaded)';
+        }
+      } catch (e) {}
+      return '';
+    }
+
+    function emitDiagnostic(eventName, status, detail, url, responseStatus) {
+      if (probeDisposed || !window.parent) return;
+      var resolvedHttpStatus = responseStatus || (url ? lookupScriptResponseStatus(url) : '');
+      var dedupeKey = eventName + '|' + (status || '') + '|' + (url || '') + '|' + (detail || '');
+      if (Object.prototype.hasOwnProperty.call(emittedDiagnostics, dedupeKey)) return;
+      emittedDiagnostics[dedupeKey] = true;
+      try {
+        window.parent.postMessage({
+          type: 'imagelab-ad-diagnostic',
+          id: adId,
+          zoneKey: zoneKey,
+          width: configuredWidth,
+          height: configuredHeight,
+          event: eventName,
+          status: status || '',
+          outcomeCategory: resolveOutcomeCategory(eventName, status),
+          responseStatus: resolvedHttpStatus,
+          detail: detail || '',
+          url: url || '',
+          elapsedMs: Date.now() - probeStartTime
+        }, '*');
+      } catch (e) {}
+    }
+
     function postStatus(status, height, message, detail) {
-      if (!window.parent) return;
+      if (probeDisposed || !window.parent) return;
       if (status === lastEmittedStatus && status !== 'loaded') return;
       lastEmittedStatus = status;
       try {
         window.parent.postMessage({
           type: 'imagelab-ad-status',
           id: adId,
+          zoneKey: zoneKey,
           status: status,
           height: typeof height === 'number' ? height : 0,
           message: message || '',
@@ -302,13 +390,50 @@ export function buildSandboxedAdSrcDoc(
       } catch (e) {}
     }
 
-    // 2. Error & CSP violation listeners
+    // 2. Capture-phase load, error & CSP violation listeners (prevents race conditions with early cached/403 script tags)
+    window.addEventListener('load', function (ev) {
+      if (ev && ev.target && ev.target !== window && ev.target.tagName) {
+        var tag = String(ev.target.tagName || '').toLowerCase();
+        if (tag === 'script') {
+          var sUrl = upgradeUrl((ev.target.getAttribute && ev.target.getAttribute('src')) || ev.target.src || '');
+          if (sUrl) {
+            earlyScriptStates[sUrl] = 'loaded';
+            for (var si = 0; si < externalScripts.length; si++) {
+              if (externalScripts[si].el === ev.target || externalScripts[si].url === sUrl) {
+                externalScripts[si].status = 'loaded';
+              }
+            }
+            emitDiagnostic(
+              'script_loaded',
+              'script_loaded',
+              'External ad script finished loading cleanly; waiting for DOM/iframe output.',
+              sUrl,
+              lookupScriptResponseStatus(sUrl) || 'loaded'
+            );
+          }
+          if (window.__imagelabAdProbe && !probeDisposed) window.__imagelabAdProbe.report(false);
+        }
+      }
+    }, true);
+
     window.addEventListener('error', function (ev) {
       if (ev && ev.target && ev.target !== window && ev.target.tagName) {
         var tag = String(ev.target.tagName || '').toLowerCase();
-        var src = ev.target.getAttribute ? (ev.target.getAttribute('src') || '') : '';
+        var src = upgradeUrl(ev.target.getAttribute ? (ev.target.getAttribute('src') || '') : '');
         if (tag === 'script' || tag === 'iframe') {
-          blockedResources.push({ tag: tag, url: src, reason: 'Failed network load or blocked by browser filter' });
+          var failDetail = tag === 'script'
+            ? 'Script failed to load (HTTP 403/404, blocked by filter, or unreachable)'
+            : 'Nested ad frame failed or blocked';
+          if (tag === 'script' && src) {
+            earlyScriptStates[src] = 'error';
+            for (var si = 0; si < externalScripts.length; si++) {
+              if (externalScripts[si].el === ev.target || externalScripts[si].url === src) {
+                externalScripts[si].status = 'error';
+              }
+            }
+          }
+          blockedResources.push({ tag: tag, url: src, reason: failDetail });
+          emitDiagnostic('script_failed', 'script_blocked', failDetail, src, lookupScriptResponseStatus(src) || 'HTTP 403/error/blocked');
         } else if (tag === 'img') {
           imageErrors.push(src || 'image resource');
         }
@@ -326,11 +451,13 @@ export function buildSandboxedAdSrcDoc(
 
     window.addEventListener('securitypolicyviolation', function (ev) {
       var blocked = ev && ev.blockedURI ? ev.blockedURI : 'external resource';
+      var reason = 'Blocked by Content Security Policy (' + (ev.violatedDirective || 'policy') + ')';
       blockedResources.push({
         tag: 'csp',
         url: blocked,
-        reason: 'Blocked by Content Security Policy (' + (ev.violatedDirective || 'policy') + ')'
+        reason: reason
       });
+      emitDiagnostic('browser_restriction', 'script_blocked', reason, blocked);
       if (window.__imagelabAdProbe) window.__imagelabAdProbe.report(false);
     });
 
@@ -341,11 +468,33 @@ export function buildSandboxedAdSrcDoc(
       return null;
     }
 
+    var nativeContentDocDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentDocument');
+    var nativeContentWinDesc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+
     function buildNestedFriendlySrcDoc(frameToken, winState, bodyHtml) {
       var prelude = '';
-      var skipKeys = { document: 1, parent: 1, top: 1, self: 1, window: 1 };
+      var skipKeys = {
+        document: 1,
+        parent: 1,
+        top: 1,
+        self: 1,
+        window: 1,
+        location: 1,
+        navigator: 1,
+        screen: 1,
+        innerWidth: 1,
+        innerHeight: 1,
+        devicePixelRatio: 1,
+        setTimeout: 1,
+        clearTimeout: 1,
+        setInterval: 1,
+        clearInterval: 1,
+        addEventListener: 1,
+        removeEventListener: 1
+      };
       for (var k in winState) {
         if (!Object.prototype.hasOwnProperty.call(winState, k) || skipKeys[k]) continue;
+        if (typeof winState[k] === 'function') continue;
         try {
           prelude += 'window[' + JSON.stringify(k) + ']=' + JSON.stringify(winState[k]) + ';';
         } catch (serErr) {}
@@ -388,12 +537,13 @@ export function buildSandboxedAdSrcDoc(
     });
 
     function installFriendlyBlankIframeBridge(el) {
-      if (!isOpaqueSandboxOrigin() || el.__imagelabBridgeInstalled) return;
+      if (!isOpaqueSandboxOrigin() || !el || el.__imagelabBridgeInstalled) return;
       el.__imagelabBridgeInstalled = true;
+      var existingSrc = (el.getAttribute && el.getAttribute('src')) || '';
       var token = 'nf_' + (++nestedBridgeSeq);
       var state = {
         token: token,
-        hasRemoteSrc: false,
+        hasRemoteSrc: isExternalHttpUrl(existingSrc),
         wroteBuffer: '',
         flushTimer: null,
         winState: {},
@@ -409,7 +559,7 @@ export function buildSandboxedAdSrcDoc(
         }
         var existingInfo = findFrameInfo(el);
         if (existingInfo) existingInfo.token = token;
-        if (!state.wroteBuffer && !Object.keys(state.winState).length) return;
+        if (!state.wroteBuffer) return;
         state.flushed = true;
         try {
           el.setAttribute('srcdoc', buildNestedFriendlySrcDoc(token, state.winState, state.wroteBuffer));
@@ -420,15 +570,29 @@ export function buildSandboxedAdSrcDoc(
 
       function scheduleFlush() {
         if (state.hasRemoteSrc || state.flushTimer) return;
-        state.flushTimer = setTimeout(flushToSrcDoc, 15);
+        state.flushTimer = setTimeout(flushToSrcDoc, 30);
       }
 
       var bodyHtmlProp = '';
       var virtualBody = {
+        nodeType: 1,
+        nodeName: 'BODY',
+        tagName: 'BODY',
+        style: {},
         childNodes: [],
+        querySelector: function () { return null; },
         querySelectorAll: function () { return []; },
         appendChild: function (child) {
+          if (child) virtualBody.childNodes.push(child);
           if (child && child.outerHTML) state.wroteBuffer += child.outerHTML;
+          else if (child && child.nodeValue) state.wroteBuffer += String(child.nodeValue);
+          scheduleFlush();
+          return child;
+        },
+        insertBefore: function (child) {
+          if (child) virtualBody.childNodes.unshift(child);
+          if (child && child.outerHTML) state.wroteBuffer += child.outerHTML;
+          else if (child && child.nodeValue) state.wroteBuffer += String(child.nodeValue);
           scheduleFlush();
           return child;
         }
@@ -443,9 +607,24 @@ export function buildSandboxedAdSrcDoc(
         }
       });
       var virtualHead = {
+        style: {},
         innerHTML: '',
         childNodes: [],
+        querySelector: function () { return null; },
         querySelectorAll: function () { return []; },
+        appendChild: function (child) {
+          if (child && child.outerHTML) state.wroteBuffer += child.outerHTML;
+          scheduleFlush();
+          return child;
+        },
+        insertBefore: function (child) {
+          if (child && child.outerHTML) state.wroteBuffer += child.outerHTML;
+          scheduleFlush();
+          return child;
+        }
+      };
+      var virtualHtml = {
+        style: {},
         appendChild: function (child) {
           if (child && child.outerHTML) state.wroteBuffer += child.outerHTML;
           scheduleFlush();
@@ -457,6 +636,7 @@ export function buildSandboxedAdSrcDoc(
         readyState: 'complete',
         head: virtualHead,
         body: virtualBody,
+        documentElement: virtualHtml,
         open: function () {
           state.wroteBuffer = '';
           return virtualDoc;
@@ -475,10 +655,23 @@ export function buildSandboxedAdSrcDoc(
         createElement: function (tag) {
           return nativeCreateElement(tag);
         },
+        createTextNode: function (txt) {
+          return document.createTextNode(txt);
+        },
+        createComment: function (txt) {
+          return document.createComment(txt);
+        },
+        createDocumentFragment: function () {
+          return document.createDocumentFragment();
+        },
+        getElementById: function () { return null; },
+        querySelector: function () { return null; },
+        querySelectorAll: function () { return []; },
         getElementsByTagName: function (tag) {
           var l = String(tag || '').toLowerCase();
           if (l === 'head') return [virtualHead];
           if (l === 'body') return [virtualBody];
+          if (l === 'html') return [virtualHtml];
           return [];
         }
       };
@@ -489,14 +682,39 @@ export function buildSandboxedAdSrcDoc(
       virtualWin.self = virtualWin;
       virtualWin.window = virtualWin;
       virtualWin.top = window;
+      virtualWin.location = {
+        href: 'about:blank',
+        protocol: isHttpsParent ? 'https:' : 'http:',
+        host: '',
+        hostname: '',
+        origin: 'null',
+        pathname: 'blank',
+        search: '',
+        hash: ''
+      };
+      virtualWin.navigator = window.navigator;
+      virtualWin.screen = window.screen;
+      virtualWin.innerWidth = window.innerWidth;
+      virtualWin.innerHeight = window.innerHeight;
+      virtualWin.devicePixelRatio = window.devicePixelRatio || 1;
+      virtualWin.setTimeout = window.setTimeout.bind(window);
+      virtualWin.clearTimeout = window.clearTimeout.bind(window);
+      virtualWin.setInterval = window.setInterval.bind(window);
+      virtualWin.clearInterval = window.clearInterval.bind(window);
+      virtualWin.frameElement = el;
+      virtualWin.addEventListener = function () {};
+      virtualWin.removeEventListener = function () {};
+      virtualDoc.defaultView = virtualWin;
+
+      state.virtualDoc = virtualDoc;
+      state.virtualWin = virtualWin;
 
       try {
         Object.defineProperty(el, 'contentDocument', {
           configurable: true,
           get: function () {
             if (state.hasRemoteSrc) {
-              var desc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentDocument');
-              return desc && desc.get ? desc.get.call(el) : null;
+              return nativeContentDocDesc && nativeContentDocDesc.get ? nativeContentDocDesc.get.call(el) : null;
             }
             return virtualDoc;
           }
@@ -505,8 +723,7 @@ export function buildSandboxedAdSrcDoc(
           configurable: true,
           get: function () {
             if (state.hasRemoteSrc) {
-              var desc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
-              return desc && desc.get ? desc.get.call(el) : null;
+              return nativeContentWinDesc && nativeContentWinDesc.get ? nativeContentWinDesc.get.call(el) : null;
             }
             return virtualWin;
           }
@@ -514,6 +731,43 @@ export function buildSandboxedAdSrcDoc(
       } catch (defErr) {
         sandboxErrors.push('Browser prevented friendly-iframe isolation bridge on about:blank frame');
       }
+    }
+
+    if (isOpaqueSandboxOrigin() && typeof HTMLIFrameElement !== 'undefined' && nativeContentDocDesc && nativeContentDocDesc.configurable) {
+      try {
+        Object.defineProperty(HTMLIFrameElement.prototype, 'contentDocument', {
+          configurable: true,
+          get: function () {
+            var s = (this.getAttribute && this.getAttribute('src')) || '';
+            if (isExternalHttpUrl(s)) {
+              return nativeContentDocDesc.get ? nativeContentDocDesc.get.call(this) : null;
+            }
+            if (!this.__imagelabBridgeInstalled) {
+              installFriendlyBlankIframeBridge(this);
+            }
+            if (this.__imagelabBridgeState && !this.__imagelabBridgeState.hasRemoteSrc) {
+              return this.__imagelabBridgeState.virtualDoc;
+            }
+            return nativeContentDocDesc.get ? nativeContentDocDesc.get.call(this) : null;
+          }
+        });
+        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+          configurable: true,
+          get: function () {
+            var s = (this.getAttribute && this.getAttribute('src')) || '';
+            if (isExternalHttpUrl(s)) {
+              return nativeContentWinDesc && nativeContentWinDesc.get ? nativeContentWinDesc.get.call(this) : null;
+            }
+            if (!this.__imagelabBridgeInstalled) {
+              installFriendlyBlankIframeBridge(this);
+            }
+            if (this.__imagelabBridgeState && !this.__imagelabBridgeState.hasRemoteSrc) {
+              return this.__imagelabBridgeState.virtualWin;
+            }
+            return nativeContentWinDesc && nativeContentWinDesc.get ? nativeContentWinDesc.get.call(this) : null;
+          }
+        });
+      } catch (protoErr) {}
     }
 
     function disableBlankBridgeIfRemote(el, url) {
@@ -559,22 +813,71 @@ export function buildSandboxedAdSrcDoc(
         if (upgraded !== scriptSrc) {
           try { el.setAttribute('src', upgraded); } catch (e) {}
         }
-        var entry = { el: el, url: upgraded, status: 'pending' };
+        if (upgraded && Object.prototype.hasOwnProperty.call(seenScriptUrls, upgraded)) {
+          // Prevent duplicate injection of the exact same ad script URL inside one frame
+          if (el.parentNode && seenScriptUrls[upgraded] !== el) {
+            try { el.parentNode.removeChild(el); } catch (e) {}
+          }
+          return;
+        }
+        if (upgraded) seenScriptUrls[upgraded] = el;
+        var initialStatus = (upgraded && earlyScriptStates[upgraded]) || 'pending';
+        var entry = { el: el, url: upgraded, status: initialStatus };
         externalScripts.push(entry);
+        emitDiagnostic(
+          'script_request_started',
+          'script_request_started',
+          'Requesting external ad script for zone ' + zoneKey,
+          upgraded
+        );
+        postStatus(
+          'script_request_started',
+          0,
+          'Script request started: ' + upgraded
+        );
+        if (initialStatus === 'loaded') {
+          emitDiagnostic(
+            'script_loaded',
+            'script_loaded',
+            'External ad script finished loading cleanly; waiting for DOM/iframe output.',
+            entry.url,
+            lookupScriptResponseStatus(entry.url) || 'loaded'
+          );
+        } else if (initialStatus === 'error') {
+          emitDiagnostic(
+            'script_failed',
+            'script_blocked',
+            'Script failed to load (HTTP 403/404, blocked by filter, or unreachable)',
+            entry.url,
+            lookupScriptResponseStatus(entry.url) || 'HTTP 403/error/blocked'
+          );
+        }
         el.addEventListener('load', function () {
           entry.status = 'loaded';
-          if (window.__imagelabAdProbe) window.__imagelabAdProbe.report(false);
+          emitDiagnostic(
+            'script_loaded',
+            'script_loaded',
+            'External ad script finished loading cleanly; waiting for DOM/iframe output.',
+            entry.url,
+            lookupScriptResponseStatus(entry.url) || 'loaded'
+          );
+          if (window.__imagelabAdProbe && !probeDisposed) window.__imagelabAdProbe.report(false);
         });
         el.addEventListener('error', function () {
           entry.status = 'error';
-          blockedResources.push({ tag: 'script', url: entry.url, reason: 'Script blocked, returned HTTP 403/404, or unreachable' });
-          if (window.__imagelabAdProbe) window.__imagelabAdProbe.report(false);
+          var failReason = 'Script failed to load (HTTP 403/404, blocked by filter, or unreachable)';
+          blockedResources.push({ tag: 'script', url: entry.url, reason: failReason });
+          emitDiagnostic('script_failed', 'script_blocked', failReason, entry.url, lookupScriptResponseStatus(entry.url) || 'HTTP 403/error/blocked');
+          if (window.__imagelabAdProbe && !probeDisposed) window.__imagelabAdProbe.report(false);
         });
       } else if (tag === 'iframe') {
         var fSrc = el.getAttribute('src') || '';
         var fUpgraded = upgradeUrl(fSrc);
         if (fUpgraded && fUpgraded !== fSrc) {
           try { el.setAttribute('src', fUpgraded); } catch (e) {}
+        }
+        if (!isExternalHttpUrl(fUpgraded)) {
+          installFriendlyBlankIframeBridge(el);
         }
         disableBlankBridgeIfRemote(el, fUpgraded);
         var bState = el.__imagelabBridgeState;
@@ -593,6 +896,12 @@ export function buildSandboxedAdSrcDoc(
           nestedBlocked: ''
         };
         nestedFrames.push(frameInfo);
+        emitDiagnostic(
+          'nested_iframe_created',
+          'iframe_created',
+          'Nested ad iframe created (' + (frameInfo.src || 'about:blank') + ')',
+          frameInfo.src || 'about:blank'
+        );
         el.addEventListener('load', function () {
           frameInfo.loadFired = true;
           var latestSrc = (el.getAttribute && el.getAttribute('src')) || frameInfo.src;
@@ -605,7 +914,9 @@ export function buildSandboxedAdSrcDoc(
         el.addEventListener('error', function () {
           frameInfo.errorFired = true;
           var latestSrc = (el.getAttribute && el.getAttribute('src')) || frameInfo.src;
-          blockedResources.push({ tag: 'iframe', url: latestSrc || 'nested frame', reason: 'Nested ad frame failed or blocked' });
+          var fFail = 'Nested ad frame failed or blocked';
+          blockedResources.push({ tag: 'iframe', url: latestSrc || 'nested frame', reason: fFail });
+          emitDiagnostic('script_failed', 'script_blocked', fFail, latestSrc || 'about:blank');
           if (window.__imagelabAdProbe) window.__imagelabAdProbe.report(false);
         });
       } else if (tag === 'img') {
@@ -627,7 +938,8 @@ export function buildSandboxedAdSrcDoc(
 
     // Observe newly parsed or injected scripts, iframes, and images from the very start
     if (typeof MutationObserver !== 'undefined') {
-      new MutationObserver(function (mutations) {
+      headMutationObserver = new MutationObserver(function (mutations) {
+        if (probeDisposed) return;
         for (var m = 0; m < mutations.length; m++) {
           var added = mutations[m].addedNodes;
           for (var i = 0; i < added.length; i++) {
@@ -641,7 +953,8 @@ export function buildSandboxedAdSrcDoc(
             }
           }
         }
-      }).observe(document.documentElement, { childList: true, subtree: true });
+      });
+      headMutationObserver.observe(document.documentElement, { childList: true, subtree: true });
     }
 
     // Observe CORS / fetch failures inside opaque sandbox without altering requests
@@ -651,13 +964,17 @@ export function buildSandboxedAdSrcDoc(
         return nativeFetch(input, init).then(function (resp) {
           if (resp && !resp.ok && (resp.status === 403 || resp.status === 401)) {
             var urlStr = typeof input === 'string' ? input : (input && input.url) || '';
-            sandboxErrors.push('HTTP ' + resp.status + ' from ' + extractHost(urlStr));
+            var httpErr = 'HTTP ' + resp.status + ' from ' + extractHost(urlStr);
+            sandboxErrors.push(httpErr);
+            emitDiagnostic('browser_restriction', 'rendering_blocked', httpErr, urlStr);
             if (window.__imagelabAdProbe) window.__imagelabAdProbe.report(false);
           }
           return resp;
         }).catch(function (err) {
           var urlStr = typeof input === 'string' ? input : (input && input.url) || '';
-          sandboxErrors.push('Network or CORS Origin:null failure fetching ' + extractHost(urlStr));
+          var corsErr = 'Network or CORS Origin:null failure fetching ' + extractHost(urlStr);
+          sandboxErrors.push(corsErr);
+          emitDiagnostic('browser_restriction', 'rendering_blocked', corsErr, urlStr);
           if (window.__imagelabAdProbe) window.__imagelabAdProbe.report(false);
           throw err;
         });
@@ -959,6 +1276,15 @@ export function buildSandboxedAdSrcDoc(
       return { total: externalScripts.length, loaded: loaded, pending: pending, failed: failed };
     }
 
+    function countPendingFrames() {
+      var pending = 0;
+      for (var i = 0; i < nestedFrames.length; i++) {
+        var f = nestedFrames[i];
+        if (f && !f.loadFired && !f.errorFired) pending++;
+      }
+      return pending;
+    }
+
     function hasLoadedCrossOriginFrame() {
       for (var i = 0; i < nestedFrames.length; i++) {
         var f = nestedFrames[i];
@@ -976,11 +1302,31 @@ export function buildSandboxedAdSrcDoc(
       }
     }
 
+    function clearGraceTimer() {
+      if (graceSettleTimer) {
+        clearTimeout(graceSettleTimer);
+        graceSettleTimer = null;
+      }
+    }
+
+    function scanUntrackedElements() {
+      if (probeDisposed) return;
+      var nodes = document.querySelectorAll('script[src], iframe, img');
+      for (var i = 0; i < nodes.length; i++) {
+        trackElement(nodes[i]);
+      }
+    }
+
     window.__imagelabAdProbe = {
+      scan: scanUntrackedElements,
       report: function (isFinal) {
+        if (probeDisposed || hasSettledFinal) return;
+        scanUntrackedElements();
         var root = document.getElementById('ad-root');
         var res = inspectContainerDom(root, document);
         var stats = countScriptStats();
+        var pendingFrames = countPendingFrames();
+        var elapsed = Date.now() - probeStartTime;
 
         var docHeight = Math.max(
           root && root.getBoundingClientRect ? Math.ceil(root.getBoundingClientRect().height || 0) : 0,
@@ -991,25 +1337,23 @@ export function buildSandboxedAdSrcDoc(
         // 1. Confirmed visible creative always wins
         if (res.visible) {
           clearCrossOriginTimer();
+          clearGraceTimer();
           hasSettledFinal = true;
-          postStatus(
-            'loaded',
-            docHeight,
-            'Verified ' + res.kind + ' (' + Math.round(res.width) + '×' + Math.round(res.height) + 'px) rendered cleanly.'
-          );
+          var visMsg = 'Verified ' + res.kind + ' (' + Math.round(res.width) + '×' + Math.round(res.height) + 'px) rendered cleanly.';
+          emitDiagnostic('creative_rendered', 'loaded', visMsg, '');
+          postStatus('loaded', docHeight, visMsg);
           return;
         }
 
-        // 2. External script or nested frame was blocked / returned 403 / unreachable
+        // 2. External script or nested frame was blocked / returned HTTP 403 / unreachable
         if (blockedResources.length > 0 && (stats.pending === 0 || isFinal)) {
           clearCrossOriginTimer();
+          clearGraceTimer();
           hasSettledFinal = true;
           var firstBlock = blockedResources[0];
-          postStatus(
-            'script_blocked',
-            0,
-            firstBlock.reason + (firstBlock.url ? ': ' + firstBlock.url.slice(0, 140) : '')
-          );
+          var blockMsg = firstBlock.reason + (firstBlock.url ? ': ' + firstBlock.url.slice(0, 140) : '');
+          emitDiagnostic('script_failed', 'script_blocked', blockMsg, firstBlock.url || '');
+          postStatus('script_blocked', 0, blockMsg);
           return;
         }
 
@@ -1017,23 +1361,51 @@ export function buildSandboxedAdSrcDoc(
         var brokenImgUrl = imageErrors[0] || (res.brokenImages && res.brokenImages[0]) || '';
         if ((runtimeErrors.length > 0 || brokenImgUrl) && (stats.pending === 0 || isFinal)) {
           clearCrossOriginTimer();
+          clearGraceTimer();
           hasSettledFinal = true;
           var errMsg = runtimeErrors[0]
             ? 'Script runtime error: ' + runtimeErrors[0]
             : 'Creative image failed to load (' + String(brokenImgUrl).slice(0, 140) + ')';
+          emitDiagnostic('script_failed', 'error', errMsg, brokenImgUrl || '');
           postStatus('error', 0, errMsg);
           return;
         }
 
-        // 4. Intermediate progress signals: distinguish script loaded vs iframe created
-        if (!isFinal && !hasSettledFinal) {
-          if (res.crossOriginFrames.length > 0 && stats.pending === 0 && hasLoadedCrossOriginFrame() && !crossOriginSettleTimer) {
+        // 4. Do NOT prematurely settle/unmount while an external script or nested iframe is still pending
+        if (isFinal && (stats.pending > 0 || pendingFrames > 0) && elapsed < 11500) {
+          if (!graceSettleTimer) {
+            graceSettleTimer = setTimeout(function () {
+              graceSettleTimer = null;
+              if (window.__imagelabAdProbe) {
+                window.__imagelabAdProbe.report(true);
+              }
+            }, Math.max(400, 12000 - elapsed));
+          }
+          if (pendingFrames > 0) {
+            postStatus(
+              'iframe_created',
+              0,
+              'Waiting for nested ad iframe to finish loading (' + Math.round(elapsed / 1000) + 's)...'
+            );
+          } else {
+            postStatus(
+              'script_request_started',
+              0,
+              'Waiting for external ad script response (' + Math.round(elapsed / 1000) + 's)...'
+            );
+          }
+          return;
+        }
+
+        // 5. Intermediate progress signals: distinguish request started vs script loaded vs iframe created
+        if (!isFinal) {
+          if (res.crossOriginFrames.length > 0 && stats.pending === 0 && pendingFrames === 0 && hasLoadedCrossOriginFrame() && !crossOriginSettleTimer) {
             crossOriginSettleTimer = setTimeout(function () {
               crossOriginSettleTimer = null;
               if (window.__imagelabAdProbe) {
                 window.__imagelabAdProbe.report(true);
               }
-            }, 250);
+            }, 450);
           }
 
           if (res.emptyBlankFrames > 0 || nestedFrames.length > 0) {
@@ -1051,54 +1423,93 @@ export function buildSandboxedAdSrcDoc(
               0,
               'External ad script loaded (' + stats.loaded + '/' + stats.total + '); checking creative output...'
             );
+            return;
+          }
+
+          if (stats.pending > 0) {
+            postStatus(
+              'script_request_started',
+              0,
+              'Requesting external ad script (' + stats.pending + ' pending)...'
+            );
           }
           return;
         }
 
-        // 5. Final settle evaluation (NEVER treat an empty about:blank iframe as visible creative!)
-        if (isFinal && !hasSettledFinal) {
+        // 6. Final settle evaluation (NEVER treat an empty about:blank iframe as visible creative!)
+        if (isFinal) {
           clearCrossOriginTimer();
+          clearGraceTimer();
           hasSettledFinal = true;
           if (isPopunder) {
-            postStatus(
-              'popunder_ready',
-              0,
-              'Popunder script loaded without errors (triggers on click/navigation rather than an inline banner).'
-            );
+            var popMsg = 'Popunder script loaded without errors (triggers on click/navigation rather than an inline banner).';
+            emitDiagnostic('creative_rendered', 'popunder_ready', popMsg, '');
+            postStatus('popunder_ready', 0, popMsg);
             return;
           }
 
           if (res.crossOriginFrames.length > 0) {
             var frameHost = res.crossOriginFrames[0].host || providerName;
-            postStatus(
-              'preview_unsupported',
-              docHeight,
+            var crossMsg =
               'External script loaded cleanly and mounted an isolated cross-origin frame (' +
-                frameHost +
-                '). Strict sandbox protection remains active; you can save and test this ad on the actual published website.'
+              frameHost +
+              '). Strict sandbox protection remains active; you can save and test this ad on the actual published website.';
+            emitDiagnostic('creative_rendered', 'preview_unsupported', crossMsg, res.crossOriginFrames[0].src || '');
+            postStatus('preview_unsupported', docHeight, crossMsg);
+            return;
+          }
+
+          if (stats.pending > 0 || pendingFrames > 0) {
+            var timeoutMsg =
+              'Timed out after ' +
+              Math.round(elapsed / 1000) +
+              's waiting for ' +
+              (stats.pending > 0 ? 'external script' : 'nested ad iframe') +
+              ' response.';
+            emitDiagnostic(
+              'timeout',
+              'timeout',
+              timeoutMsg,
+              externalScripts[0] ? externalScripts[0].url : ''
             );
+            postStatus('timeout', 0, timeoutMsg);
             return;
           }
 
           if (sandboxErrors.length > 0) {
-            postStatus(
-              'rendering_blocked',
-              0,
-              'Creative rendering blocked: ' + sandboxErrors[0] +
-                (res.emptyBlankFrames > 0 ? ' (mounted nested about:blank iframe stayed empty).' : '.')
-            );
+            var restrictMsg =
+              'Creative rendering blocked: ' +
+              sandboxErrors[0] +
+              (res.emptyBlankFrames > 0 ? ' (mounted nested about:blank iframe stayed empty).' : '.');
+            emitDiagnostic('browser_restriction', 'rendering_blocked', restrictMsg, '');
+            postStatus('rendering_blocked', 0, restrictMsg);
             return;
           }
 
           var noFillMsg = res.emptyBlankFrames > 0
             ? providerName + ' script loaded and mounted an empty about:blank iframe, but returned no ad inventory or visible creative.'
             : stats.loaded > 0
-              ? providerName + ' script loaded (' + stats.loaded + ' script' + (stats.loaded > 1 ? 's' : '') + ') without errors, but returned no ad inventory or visible creative.'
+              ? providerName + ' script loaded (' + stats.loaded + ' script' + (stats.loaded > 1 ? 's' : '') + ') with an empty/no-op response and created no creative.'
               : (atFormat === 'iframe'
                 ? providerName + ' snippet executed without errors, but no creative fill was returned.'
                 : 'Advertisement snippet executed without errors, but produced no visible creative output.');
+          emitDiagnostic(
+            'empty_response',
+            'no_inventory',
+            noFillMsg,
+            externalScripts[0] ? externalScripts[0].url : ''
+          );
           postStatus('no_inventory', 0, noFillMsg);
         }
+      },
+      dispose: function () {
+        probeDisposed = true;
+        clearCrossOriginTimer();
+        clearGraceTimer();
+        if (headMutationObserver && headMutationObserver.disconnect) {
+          try { headMutationObserver.disconnect(); } catch (e) {}
+        }
+        headMutationObserver = null;
       }
     };
   })();
@@ -1109,27 +1520,47 @@ export function buildSandboxedAdSrcDoc(
   <script>
     (function () {
       var root = document.getElementById('ad-root');
+      var bodyMutationObserver = null;
+      var bodyResizeObserver = null;
+      var probeTimers = [];
       var run = function (isFinal) {
         if (window.__imagelabAdProbe) {
           window.__imagelabAdProbe.report(Boolean(isFinal));
         }
       };
+      if (window.__imagelabAdProbe && window.__imagelabAdProbe.scan) {
+        window.__imagelabAdProbe.scan();
+      }
       if (document.readyState === 'complete') {
         run(false);
       } else {
         window.addEventListener('load', function () { run(false); });
       }
-      setTimeout(function () { run(false); }, 150);
-      setTimeout(function () { run(false); }, 700);
-      setTimeout(function () { run(false); }, 1600);
-      setTimeout(function () { run(false); }, 2800);
-      setTimeout(function () { run(true); }, 4200);
+      probeTimers.push(setTimeout(function () { run(false); }, 150));
+      probeTimers.push(setTimeout(function () { run(false); }, 650));
+      probeTimers.push(setTimeout(function () { run(false); }, 1500));
+      probeTimers.push(setTimeout(function () { run(false); }, 3000));
+      probeTimers.push(setTimeout(function () { run(false); }, 5500));
+      probeTimers.push(setTimeout(function () { run(true); }, 8000));
       if (typeof MutationObserver !== 'undefined' && root) {
-        new MutationObserver(function () { run(false); }).observe(root, { childList: true, subtree: true, attributes: true });
+        bodyMutationObserver = new MutationObserver(function () { run(false); });
+        bodyMutationObserver.observe(root, { childList: true, subtree: true, attributes: true });
       }
       if (typeof ResizeObserver !== 'undefined' && root) {
-        new ResizeObserver(function () { run(false); }).observe(root);
+        bodyResizeObserver = new ResizeObserver(function () { run(false); });
+        bodyResizeObserver.observe(root);
       }
+      var disposeAll = function () {
+        for (var t = 0; t < probeTimers.length; t++) clearTimeout(probeTimers[t]);
+        probeTimers = [];
+        if (bodyMutationObserver && bodyMutationObserver.disconnect) bodyMutationObserver.disconnect();
+        if (bodyResizeObserver && bodyResizeObserver.disconnect) bodyResizeObserver.disconnect();
+        if (window.__imagelabAdProbe && window.__imagelabAdProbe.dispose) {
+          window.__imagelabAdProbe.dispose();
+        }
+      };
+      window.addEventListener('pagehide', disposeAll);
+      window.addEventListener('unload', disposeAll);
     })();
   </script>
 </body>

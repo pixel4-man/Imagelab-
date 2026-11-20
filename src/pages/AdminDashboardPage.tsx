@@ -7,7 +7,6 @@ import {
   FileText,
   Flag,
   ImagePlus,
-  Megaphone,
   RotateCcw,
   Search,
   Settings,
@@ -31,7 +30,6 @@ import {
   writeBatch,
 } from 'firebase/firestore';
 import { Link, useSearchParams } from 'react-router-dom';
-import { AdsManagerWorkspace } from '../components/AdsManagerWorkspace';
 import { BackButton } from '../components/BackButton';
 import { PageTransition } from '../components/PageTransition';
 import { SafeImage } from '../components/SafeImage';
@@ -82,7 +80,6 @@ interface ReportRow {
 type AdminTab =
   | 'prompts'
   | 'users'
-  | 'ads'
   | 'reports'
   | 'admin_management'
   | 'website_settings';
@@ -125,7 +122,6 @@ export function AdminDashboardPage() {
   const validTabs: AdminTab[] = [
     'prompts',
     'users',
-    'ads',
     'reports',
     'admin_management',
     'website_settings',
@@ -161,7 +157,6 @@ export function AdminDashboardPage() {
   const [promptsList, setPromptsList] = useState<AdminPromptRow[]>([]);
   const [usersList, setUsersList] = useState<DirectoryUser[]>([]);
   const [reportsList, setReportsList] = useState<ReportRow[]>([]);
-  const [activeAdsCount, setActiveAdsCount] = useState(0);
 
   // Prompt Management Filters & Modals
   const [promptSearch, setPromptSearch] = useState('');
@@ -286,17 +281,6 @@ export function AdminDashboardPage() {
       }
     );
 
-    const unsubAds = onSnapshot(
-      collection(db, 'ads'),
-      (snap) => {
-        const activeCount = snap.docs.filter((d) => d.data()?.status === 'active').length;
-        setActiveAdsCount(activeCount);
-      },
-      () => {
-        // Admin API fallback below
-      }
-    );
-
     if (isSuperAdmin) {
       getDoc(doc(db, 'siteSettings', 'global'))
         .then((snap) => {
@@ -314,36 +298,8 @@ export function AdminDashboardPage() {
       unsubPrompts();
       unsubUsers();
       unsubReports();
-      unsubAds();
     };
   }, [userProfile, fetchAdminPrompts, isSuperAdmin]);
-
-  useEffect(() => {
-    if (!userProfile) return;
-    getIdToken()
-      .then((token) =>
-        token
-          ? fetch('/api/admin/ads', {
-              headers: { Authorization: `Bearer ${token}` },
-              cache: 'no-store',
-            })
-          : null
-      )
-      .then(async (res) => {
-        if (
-          !res ||
-          !res.ok ||
-          !res.headers.get('content-type')?.toLowerCase().includes('application/json')
-        ) {
-          return;
-        }
-        const payload = (await res.json()) as { ads?: { status?: string }[] };
-        if (Array.isArray(payload.ads)) {
-          setActiveAdsCount(payload.ads.filter((a) => a.status === 'active').length);
-        }
-      })
-      .catch(() => {});
-  }, [userProfile, getIdToken]);
 
   const userEmailByUid = useMemo(() => {
     const map = new Map<string, string>();
@@ -360,9 +316,9 @@ export function AdminDashboardPage() {
     () => ({
       registeredUsers: usersList.length,
       totalPrompts: promptsList.length,
-      activeAds: activeAdsCount,
+      reportsCount: reportsList.length,
     }),
-    [usersList.length, promptsList.length, activeAdsCount]
+    [usersList.length, promptsList.length, reportsList.length]
   );
 
   const filteredPrompts = useMemo(() => {
@@ -849,7 +805,6 @@ export function AdminDashboardPage() {
     const base: { id: AdminTab; label: string; icon: typeof FileText }[] = [
       { id: 'prompts', label: 'All Prompts', icon: FileText },
       { id: 'users', label: 'Users Directory', icon: Users },
-      { id: 'ads', label: 'Ads Manager', icon: Megaphone },
       { id: 'reports', label: `Reports (${reportsList.length})`, icon: Flag },
     ];
     if (isSuperAdmin) {
@@ -884,13 +839,6 @@ export function AdminDashboardPage() {
               <Sparkles className="w-4 h-4" aria-hidden="true" />
               <span>Publish Official Prompt</span>
             </button>
-            <Link
-              to="/admin/ads"
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#E76F51] hover:bg-[#D05A3C] text-white text-xs font-semibold transition-colors min-h-[40px]"
-            >
-              <Megaphone className="w-4 h-4" aria-hidden="true" />
-              <span>Open Ads Manager</span>
-            </Link>
           </div>
         </div>
 
@@ -904,7 +852,7 @@ export function AdminDashboardPage() {
               Admin Dashboard
             </h1>
             <p className="text-sm text-[#264653]/75 mt-1">
-              Complete administrative control over all public, ready-made, official, and contributor prompts, users, visual ads, and reports.
+              Complete administrative control over all public, ready-made, official, and contributor prompts, users, and moderation reports.
             </p>
           </div>
           {isSuperAdmin && (
@@ -926,7 +874,7 @@ export function AdminDashboardPage() {
           {[
             { label: 'Registered Users', value: metrics.registeredUsers, accent: 'text-[#264653]' },
             { label: 'Total Prompts', value: metrics.totalPrompts, accent: 'text-[#264653]' },
-            { label: 'Active Ads', value: metrics.activeAds, accent: 'text-[#2A9D8F]' },
+            { label: 'Reports', value: metrics.reportsCount, accent: 'text-[#E76F51]' },
           ].map((stat) => (
             <div
               key={stat.label}
@@ -1250,14 +1198,7 @@ export function AdminDashboardPage() {
           </div>
         )}
 
-        {/* TAB 3: Full Ads Manager Embedded */}
-        {tab === 'ads' && (
-          <AdsManagerWorkspace
-            onCountChange={(counts) => setActiveAdsCount(counts.active)}
-          />
-        )}
-
-        {/* TAB 4: Reports */}
+        {/* TAB 3: Reports */}
         {tab === 'reports' && (
           <div className="rounded-3xl bg-[#FAF7F2] border border-[#264653]/12 overflow-hidden">
             <div className="p-6 border-b border-[#264653]/10">

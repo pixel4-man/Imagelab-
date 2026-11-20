@@ -18,14 +18,9 @@ import {
 import {
   detectAdProvider,
   extractAtOptionsMetadata,
-  findDuplicatePlacement,
-  formatReadableError,
   hasOwnInteractiveOrScriptElements,
   normalizeCreativeMarkup,
   normalizePageRoute,
-  normalizeSlotIdentifier,
-  validateAdPayload,
-  validatePlacementPayload,
   validateSafeHttpUrl,
 } from '../src/types/ads.ts';
 import {
@@ -33,9 +28,25 @@ import {
   preprocessCreativeForSandbox,
 } from '../src/lib/adFrameHtml.ts';
 import {
-  callJsonApiWithFallback,
-  isJsonContentType,
-} from '../src/lib/adsApiClient.ts';
+  ADSTERRA_ZONES,
+  ADSTERRA_ZONES_BY_ID,
+  BUILTIN_AD_PLACEMENTS,
+  buildAdsterraZoneScript,
+  buildDefaultAdsterraAdRecord,
+  extractAdsterraZoneKey,
+  getBuiltinAdsterraState,
+  getPlacementDeviceTarget,
+} from '../src/lib/adsterraZones.ts';
+import {
+  computeShelfCardTransform,
+  computeShelfOffset,
+  deriveShelfCategories,
+  formatPublicEditorialSubtitle,
+  getPreloadIndices,
+  resolveSwipeStep,
+  stepShelfIndex,
+} from '../src/lib/landingShelf.ts';
+import { READY_MADE_PROMPTS } from '../src/server/seededPromptsData.ts';
 
 test('1. Super Admin bootstrap requires exact verified email adilwss67@gmail.com', () => {
   assert.equal(DEFAULT_SUPER_ADMIN_EMAIL, 'adilwss67@gmail.com');
@@ -302,80 +313,43 @@ test('9. Persistence, ProtectedRoute authReady guard, and profile preservation i
   assert.match(protectedRouteSource, /if\s*\(!firebaseUser\)/);
 });
 
-test('10. Visual Ad Placement & Ads Manager payload validation, route/slot normalization, and priority clamping', () => {
-  assert.equal(normalizeSlotIdentifier('  Hero Sponsor Slot #1 '), 'hero_sponsor_slot_1');
+test('10. Route normalization, provider detection, and Ads Manager complete removal hold', () => {
   assert.equal(normalizePageRoute('/explore/?q=test#top'), '/explore');
   assert.equal(normalizePageRoute('trending'), '/trending');
+  assert.equal(detectAdProvider('https://bicea.org/22/9bf275cec2fca23dd811c4ea8b659006'), 'Adsterra');
 
-  const validPlacement = validatePlacementPayload({
-    name: '  Homepage Below Hero  ',
-    pageRoute: '/?ref=preview',
-    slotId: 'Homepage Hero Section!',
-    selector: '[data-ad-slot="homepage_hero"]',
-    elementInfo: 'Homepage Hero Section (<section>)',
-    position: 'after',
-    status: 'active',
-    priority: 1200,
-  });
-  assert.equal(validPlacement.valid, true);
-  assert.equal(validPlacement.sanitized?.name, 'Homepage Below Hero');
-  assert.equal(validPlacement.sanitized?.pageRoute, '/');
-  assert.equal(validPlacement.sanitized?.slotId, 'homepage_hero_section');
-  assert.equal(validPlacement.sanitized?.priority, 999);
+  for (const deletedFile of [
+    'src/pages/AdsManagerPage.tsx',
+    'src/components/AdsManagerWorkspace.tsx',
+    'src/components/VisualPlacementOverlay.tsx',
+    'src/context/PlacementSelectorContext.tsx',
+    'src/lib/adsApiClient.ts',
+  ]) {
+    assert.equal(
+      fs.existsSync(path.resolve(process.cwd(), deletedFile)),
+      false,
+      `Deleted Ads Manager file must not exist: ${deletedFile}`
+    );
+  }
 
-  const missingSelector = validatePlacementPayload({
-    name: 'Empty Selector',
-    pageRoute: '/',
-    slotId: 'hero',
-    selector: '',
-    elementInfo: 'Section',
-    position: 'after',
-    status: 'active',
-    priority: 10,
-  });
-  assert.equal(missingSelector.valid, false);
-
-  const validAd = validateAdPayload({
-    name: '  Header Leaderboard  ',
-    provider: '  Google AdSense  ',
-    adType: 'responsive_banner',
-    scriptCode: '<div data-ad="leaderboard">Banner</div>',
-    placementId: 'placement_hero_123',
-    width: '728px',
-    height: '90px',
-    status: 'active',
-    priority: 0,
-  });
-  assert.equal(validAd.valid, true);
-  assert.equal(validAd.sanitized?.name, 'Header Leaderboard');
-  assert.equal(validAd.sanitized?.placementId, 'placement_hero_123');
-  assert.equal(validAd.sanitized?.priority, 1);
-
-  const missingPlacementId = validateAdPayload({
-    name: 'Unbound Ad',
-    provider: 'Adsterra',
-    adType: 'banner',
-    scriptCode: '<div>Ad</div>',
-    placementId: '',
-    width: 'auto',
-    height: 'auto',
-    status: 'active',
-    priority: 5,
-  });
-  assert.equal(missingPlacementId.valid, false);
-
-  const invalidDims = validateAdPayload({
-    name: 'Bad Width',
-    provider: 'PropellerAds',
-    adType: 'popunder',
-    scriptCode: '<script>window.pop=1;</script>',
-    placementId: 'placement_1',
-    width: 'javascript:alert(1)',
-    height: 'auto',
-    status: 'active',
-    priority: 10,
-  });
-  assert.equal(invalidDims.valid, false);
+  for (const activeFile of [
+    'src/App.tsx',
+    'src/components/Navbar.tsx',
+    'src/pages/AdminDashboardPage.tsx',
+    'src/pages/SuperAdminDashboardPage.tsx',
+    'src/pages/ProfilePage.tsx',
+    'src/components/AdSlot.tsx',
+    'src/components/VisualAdInjector.tsx',
+    'src/lib/adsPersistence.ts',
+    'server.ts',
+  ]) {
+    const content = fs.readFileSync(path.resolve(process.cwd(), activeFile), 'utf-8');
+    assert.doesNotMatch(
+      content,
+      /AdsManager|PlacementSelector|VisualPlacementOverlay|\/admin\/ads|adsApiClient/,
+      `File must not reference removed Ads Manager symbols: ${activeFile}`
+    );
+  }
 });
 
 test('11. Redesigned Navigation removes Categories, keeps single-line desktop & right drawer, and preserves BackButton', () => {
@@ -435,7 +409,6 @@ test('11. Redesigned Navigation removes Categories, keeps single-line desktop & 
     'src/pages/LoginPage.tsx',
     'src/pages/SignUpPage.tsx',
     'src/pages/AdminDashboardPage.tsx',
-    'src/pages/AdsManagerPage.tsx',
     'src/pages/SuperAdminDashboardPage.tsx',
     'src/pages/DashboardPage.tsx',
     'src/pages/LegalPage.tsx',
@@ -445,25 +418,16 @@ test('11. Redesigned Navigation removes Categories, keeps single-line desktop & 
   }
 });
 
-test('12. Visual Placement Selector wires data-ad-slot anchors, touch/dblclick overlay, and sandboxed Ad injection', () => {
-  const overlaySource = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/components/VisualPlacementOverlay.tsx'),
-    'utf-8'
-  );
-  assert.match(overlaySource, /PLACEMENT SELECTION MODE — Double tap any area to select it\./);
-  assert.match(overlaySource, /addEventListener\('dblclick'/);
-  assert.match(overlaySource, /addEventListener\('pointerup'/);
-  assert.match(overlaySource, /Select Another Area/);
-  assert.match(overlaySource, /Confirm Placement/);
-  assert.match(overlaySource, /if \(!selectionMode \|\| !isPrivilegedAdmin\)/);
-
+test('12. Predefined public ad placement slots wire safely to VisualAdInjector and strict sandboxed AdSlot frames', () => {
   const injectorSource = fs.readFileSync(
     path.resolve(process.cwd(), 'src/components/VisualAdInjector.tsx'),
     'utf-8'
   );
   assert.match(injectorSource, /createPortal/);
-  assert.match(injectorSource, /anchorMissing/);
+  assert.match(injectorSource, /getPredefinedActiveAdState/);
+  assert.match(injectorSource, /isPublicAdRoute/);
   assert.match(injectorSource, /LivePublicAdItem/);
+  assert.doesNotMatch(injectorSource, /fetch\(/);
 
   const adSlotSource = fs.readFileSync(
     path.resolve(process.cwd(), 'src/components/AdSlot.tsx'),
@@ -471,39 +435,22 @@ test('12. Visual Placement Selector wires data-ad-slot anchors, touch/dblclick o
   );
   assert.match(adSlotSource, /sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"/);
   assert.doesNotMatch(adSlotSource, /allow-same-origin/);
-  assert.match(adSlotSource, /Preview ·/);
-  assert.match(adSlotSource, /\/api\/ads\/active/);
-
-  const adsWorkspaceSource = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/components/AdsManagerWorkspace.tsx'),
-    'utf-8'
-  );
-  assert.match(adsWorkspaceSource, /Select Placement on Website/);
-  assert.match(adsWorkspaceSource, /anchorMissing/);
+  assert.doesNotMatch(adSlotSource, /\/api\/ads\/active/);
 
   const anchorSources = [
+    'src/App.tsx',
     'src/pages/HomePage.tsx',
     'src/pages/ExplorePage.tsx',
-    'src/pages/TrendingPage.tsx',
-    'src/pages/PromptDetailsPage.tsx',
-    'src/components/Footer.tsx',
   ]
     .map((file) => fs.readFileSync(path.resolve(process.cwd(), file), 'utf-8'))
     .join('\n');
 
   for (const expectedSlot of [
-    'homepage_hero',
-    'homepage_trending',
-    'homepage_gallery',
-    'homepage_callout',
-    'explore_header',
-    'explore_gallery',
-    'trending_spotlight',
-    'trending_grid',
-    'prompt_details_image',
-    'prompt_details_panel',
-    'prompt_details_related',
-    'site_footer',
+    'desktop_header_banner',
+    'mobile_header_banner',
+    'desktop_homepage_banner',
+    'homepage_gallery_banner',
+    'desktop_sidebar_banner',
   ]) {
     assert.ok(
       anchorSources.includes(`data-ad-slot="${expectedSlot}"`),
@@ -512,29 +459,11 @@ test('12. Visual Placement Selector wires data-ad-slot anchors, touch/dblclick o
   }
 });
 
-test('13. Server endpoints expose active visual placements/ads publicly and enforce adminGuard on CRUD routes', () => {
+test('13. Server removes obsolete ad-management endpoints while enforcing adminGuard on prompt moderation routes', () => {
   const serverSource = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
-  assert.match(serverSource, /app\.get\(\s*'\/api\/ads\/active'/);
-  assert.match(serverSource, /app\.get\(\s*'\/api\/admin\/placements',\s*requireAuthToken,\s*adminGuard/);
-  assert.match(serverSource, /app\.post\(\s*'\/api\/admin\/placements',\s*requireAuthToken,\s*adminGuard/);
-  assert.match(
-    serverSource,
-    /app\.patch\(\s*'\/api\/admin\/placements\/:placementId',\s*requireAuthToken,\s*adminGuard/
-  );
-  assert.match(
-    serverSource,
-    /app\.delete\(\s*'\/api\/admin\/placements\/:placementId',\s*requireAuthToken,\s*adminGuard/
-  );
-  assert.match(serverSource, /app\.get\(\s*'\/api\/admin\/ads',\s*requireAuthToken,\s*adminGuard/);
-  assert.match(serverSource, /app\.post\(\s*'\/api\/admin\/ads',\s*requireAuthToken,\s*adminGuard/);
-  assert.match(
-    serverSource,
-    /app\.patch\(\s*'\/api\/admin\/ads\/:adId',\s*requireAuthToken,\s*adminGuard/
-  );
-  assert.match(
-    serverSource,
-    /app\.delete\(\s*'\/api\/admin\/ads\/:adId',\s*requireAuthToken,\s*adminGuard/
-  );
+  assert.doesNotMatch(serverSource, /\/api\/ads\/active/);
+  assert.doesNotMatch(serverSource, /\/api\/admin\/placements/);
+  assert.doesNotMatch(serverSource, /\/api\/admin\/ads/);
   assert.match(serverSource, /app\.post\(\s*'\/api\/admin\/prompts',\s*requireAuthToken,\s*adminGuard/);
   assert.match(
     serverSource,
@@ -630,20 +559,6 @@ test('15. Prompt Cards Copy Prompt, DM Sans Prompt Details, Search by Prompt, Vi
   );
   assert.match(uploadSource, /15000/);
 
-  const overlaySource = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/components/VisualPlacementOverlay.tsx'),
-    'utf-8'
-  );
-  assert.match(overlaySource, /\/prompt\/travertine-solstice-atrium/);
-  assert.match(overlaySource, /closest\('button, input, select, textarea, label, \[role="button"\]'\)/);
-
-  const managerSource = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/components/AdsManagerWorkspace.tsx'),
-    'utf-8'
-  );
-  assert.match(managerSource, /Preview Placement/);
-  assert.match(managerSource, /Edit \/ Rename/);
-
   const injectorSource = fs.readFileSync(
     path.resolve(process.cwd(), 'src/components/VisualAdInjector.tsx'),
     'utf-8'
@@ -671,16 +586,15 @@ test('16. Complete Admin Prompt Control, Unified All Prompts, 3-Card Dashboard, 
     'utf-8'
   );
   // Simplified 3-card overview metrics from real Firebase state
-  for (const metricLabel of ['Registered Users', 'Total Prompts', 'Active Ads']) {
+  for (const metricLabel of ['Registered Users', 'Total Prompts', 'Reports']) {
     assert.ok(adminSource.includes(metricLabel), `Admin overview missing card: ${metricLabel}`);
   }
-  assert.doesNotMatch(adminSource, /Published Official Prompts|Pending Reviews/);
+  assert.doesNotMatch(adminSource, /Published Official Prompts|Pending Reviews|Active Ads|Ads Manager/);
 
-  // Navigation / tabs: All Prompts, Users Directory, Ads Manager, Reports + Super Admin links
+  // Navigation / tabs: All Prompts, Users Directory, Reports + Super Admin links
   for (const section of [
     'All Prompts',
     'Users Directory',
-    'Ads Manager',
     'Reports',
     'Admin Management',
     'Website Settings',
@@ -856,194 +770,27 @@ test('18. Production SEO, sitemap.xml, robots.txt, canonicals, and prompt-secret
   assert.doesNotMatch(seoHeadSlice, /promptText/);
 });
 
-test('19. Visual placement persistence fixes HTML SPA fallback, enforces dimensions/adType, prevents duplicates, and surfaces real errors', async () => {
-  // 1. Dimensions & AdType validation
-  const withDims = validatePlacementPayload({
-    name: 'Homepage Banner Zone',
-    pageRoute: '/',
-    slotId: 'homepage_hero',
-    selector: '[data-ad-slot="homepage_hero"]',
-    elementInfo: 'Hero (<section>)',
-    position: 'after',
-    width: '728px',
-    height: '90px',
-    adType: 'banner',
-    status: 'active',
-    priority: 5,
-  });
-  assert.equal(withDims.valid, true);
-  assert.equal(withDims.sanitized?.width, '728px');
-  assert.equal(withDims.sanitized?.height, '90px');
-  assert.equal(withDims.sanitized?.adType, 'banner');
-
-  const badWidth = validatePlacementPayload({
-    name: 'Bad Width Zone',
-    pageRoute: '/',
-    slotId: 'homepage_hero',
-    selector: '[data-ad-slot="homepage_hero"]',
-    elementInfo: 'Hero (<section>)',
-    position: 'after',
-    width: 'expression(alert(1))',
-    height: '90px',
-    adType: 'banner',
-    status: 'active',
-    priority: 5,
-  });
-  assert.equal(badWidth.valid, false);
-
-  // 2. Duplicate placement prevention
-  const existing = [
-    {
-      id: 'plc_existing_1',
-      name: 'Homepage Below Hero',
-      pageRoute: '/',
-      slotId: 'homepage_hero',
-      selector: '[data-ad-slot="homepage_hero"]',
-      position: 'after' as const,
-    },
-  ];
-  const dup = findDuplicatePlacement(
-    {
-      pageRoute: '/',
-      slotId: 'homepage_hero',
-      selector: '[data-ad-slot="homepage_hero"]',
-      position: 'after',
-    },
-    existing
+test('19. Automatic ad state loads purely from source-code configuration without Firestore or Ads Manager API calls', () => {
+  const persistenceSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/lib/adsPersistence.ts'),
+    'utf-8'
   );
-  assert.equal(dup?.id, 'plc_existing_1');
-  assert.equal(
-    findDuplicatePlacement(
-      {
-        pageRoute: '/',
-        slotId: 'homepage_hero',
-        selector: '[data-ad-slot="homepage_hero"]',
-        position: 'after',
-      },
-      existing,
-      'plc_existing_1'
-    ),
-    null
-  );
-  assert.equal(
-    findDuplicatePlacement(
-      {
-        pageRoute: '/',
-        slotId: 'homepage_hero',
-        selector: '[data-ad-slot="homepage_hero"]',
-        position: 'before',
-      },
-      existing
-    ),
-    null
-  );
+  assert.match(persistenceSource, /getBuiltinAdsterraState/);
+  assert.doesNotMatch(persistenceSource, /collection\(db,\s*'ads'\)|adPlacements|publicAdSlots|\/api\/admin\/ads/);
 
-  // 3. Readable error formatting unwraps JSON FirestoreErrorInfo cleanly
-  assert.equal(
-    formatReadableError(
-      new Error(
-        JSON.stringify({
-          error: 'Missing or insufficient permissions.',
-          operationType: 'create',
-          path: 'adPlacements/plc_1',
-        })
-      )
-    ),
-    'Missing or insufficient permissions. (create adPlacements/plc_1)'
-  );
-  assert.equal(
-    formatReadableError(new Error('Admin privileges required.'), 'Fallback'),
-    'Admin privileges required.'
-  );
-
-  // 4. API client detects Cloudflare HTML SPA fallback & 503, refreshes expired 401 token, and propagates backend JSON errors
-  assert.equal(isJsonContentType('text/html; charset=utf-8'), false);
-  assert.equal(isJsonContentType('application/json; charset=utf-8'), true);
-
-  const htmlFallbackResult = await callJsonApiWithFallback('/api/admin/placements', {
-    method: 'POST',
-    body: { name: 'Test' },
-    requireAuth: true,
-    getIdToken: async () => 'token-1',
-    fetchImpl: async () =>
-      new Response('<!doctype html><html><body>SPA</body></html>', {
-        status: 200,
-        headers: { 'content-type': 'text/html; charset=utf-8' },
-      }),
-  });
-  assert.equal(htmlFallbackResult.apiUnavailable, true);
-
-  const adminSdkMissingResult = await callJsonApiWithFallback('/api/admin/placements', {
-    method: 'POST',
-    body: { name: 'Test' },
-    requireAuth: true,
-    getIdToken: async () => 'token-1',
-    fetchImpl: async () =>
-      new Response(JSON.stringify({ error: 'Server Admin SDK credentials are not configured.' }), {
-        status: 503,
-        headers: { 'content-type': 'application/json' },
-      }),
-  });
-  assert.equal(adminSdkMissingResult.apiUnavailable, true);
-
-  let tokenCalls = 0;
-  let attempt = 0;
-  const refreshedResult = await callJsonApiWithFallback<{ placement: { id: string } }>(
-    '/api/admin/placements',
-    {
-      method: 'POST',
-      body: { name: 'Test' },
-      requireAuth: true,
-      getIdToken: async (forceRefresh) => {
-        tokenCalls += 1;
-        return forceRefresh ? 'fresh-token' : 'stale-token';
-      },
-      fetchImpl: async (_input, init) => {
-        attempt += 1;
-        const authHeader = (init?.headers as Record<string, string>)?.Authorization;
-        if (attempt === 1) {
-          assert.equal(authHeader, 'Bearer stale-token');
-          return new Response(JSON.stringify({ error: 'Token expired.' }), {
-            status: 401,
-            headers: { 'content-type': 'application/json' },
-          });
-        }
-        assert.equal(authHeader, 'Bearer fresh-token');
-        return new Response(JSON.stringify({ placement: { id: 'plc_123' } }), {
-          status: 201,
-          headers: { 'content-type': 'application/json' },
-        });
-      },
-    }
-  );
-  assert.equal(tokenCalls, 2);
-  assert.equal(refreshedResult.apiUnavailable, false);
-  assert.equal(refreshedResult.data?.placement.id, 'plc_123');
-
-  await assert.rejects(
-    callJsonApiWithFallback('/api/admin/placements', {
-      method: 'POST',
-      body: { name: 'Dup' },
-      requireAuth: true,
-      getIdToken: async () => 'token-1',
-      fetchImpl: async () =>
-        new Response(JSON.stringify({ error: 'A placement named "Hero" already exists.' }), {
-          status: 409,
-          headers: { 'content-type': 'application/json' },
-        }),
-    }),
-    /A placement named "Hero" already exists\./
-  );
-
-  // 5. Server duplicate check & publicAdSlots sync present
-  const serverSource = fs.readFileSync(path.resolve(process.cwd(), 'server.ts'), 'utf-8');
-  assert.match(serverSource, /findDuplicatePlacement/);
-  assert.match(serverSource, /res\.status\(409\)\.json/);
-  assert.match(serverSource, /syncPublicAdSlotAdmin/);
-  assert.match(serverSource, /syncPublicAdSlotsForPlacementAdmin/);
+  const state = getBuiltinAdsterraState();
+  assert.equal(state.placements.length, 5);
+  assert.equal(state.ads.length, 5);
+  for (const placement of state.placements) {
+    assert.equal(placement.status, 'active');
+  }
+  for (const ad of state.ads) {
+    assert.equal(ad.status, 'active');
+    assert.equal(ad.provider, 'Adsterra');
+  }
 });
 
-test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects provider, secures Destination URL & click wrapping, and collapses empty boxes', () => {
+test('20. Sandboxed AdSlot preserves URL safety, provider detection, no-inventory collapsing, and zero-false-positive visibility', () => {
   // 1. Safe Destination URL validation
   assert.equal(validateSafeHttpUrl('').valid, true);
   assert.equal(validateSafeHttpUrl('https://partner.example.com/offer?id=1').valid, true);
@@ -1058,71 +805,15 @@ test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects
     'Adsterra'
   );
   assert.equal(
-    detectAdProvider(`<script src="//www.highperformanceformat.com/123/invoke.js"></script>`),
+    detectAdProvider(`<script src="//bicea.org/22/9bf275cec2fca23dd811c4ea8b659006"></script>`),
     'Adsterra'
-  );
-  assert.equal(
-    detectAdProvider(`<ins class="adsbygoogle"></ins><script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js"></script>`),
-    'Google AdSense'
-  );
-  assert.equal(
-    detectAdProvider(`<script src="https://alwingulla.com/88/tag.min.js"></script>`),
-    'Monetag'
   );
   assert.equal(detectAdProvider(`<script src="https://cdn.example.net/ads.js"></script>`), 'Generic Ad Network');
   assert.equal(detectAdProvider('https://cdn.example.com/banner-728x90.webp'), 'Custom Banner');
   assert.equal(detectAdProvider(`<img src="https://cdn.example.com/b.png" />`), 'Custom Banner');
   assert.equal(detectAdProvider(`<div>Sponsored Studio Offer</div>`), 'Custom Ad');
 
-  // 3. validateAdPayload succeeds WITHOUT name or provider inputs and derives them cleanly
-  const adsterraCheck = validateAdPayload(
-    {
-      adType: 'banner',
-      placementId: 'plc_hero_1',
-      width: '728px',
-      height: '90px',
-      status: 'active',
-      priority: 5,
-      scriptCode: `<script>atOptions = {'key':'abc'};</script><script src="//www.highperformanceformat.com/abc/invoke.js"></script>`,
-    },
-    { placementName: 'Homepage Below Hero' }
-  );
-  assert.equal(adsterraCheck.valid, true);
-  assert.equal(adsterraCheck.sanitized?.provider, 'Adsterra');
-  assert.equal(adsterraCheck.sanitized?.name, 'Adsterra · Homepage Below Hero');
-  assert.equal(adsterraCheck.sanitized?.destinationUrl, '');
-
-  const customBannerCheck = validateAdPayload(
-    {
-      adType: 'banner',
-      placementId: 'plc_footer_1',
-      width: '300px',
-      height: '250px',
-      status: 'active',
-      priority: 12,
-      destinationUrl: 'https://sponsor.example.com/deals',
-      scriptCode: 'https://cdn.example.com/ad-300x250.png',
-    },
-    { placementName: 'Footer Banner' }
-  );
-  assert.equal(customBannerCheck.valid, true);
-  assert.equal(customBannerCheck.sanitized?.provider, 'Custom Banner');
-  assert.equal(customBannerCheck.sanitized?.name, 'Custom Banner · Footer Banner');
-  assert.equal(customBannerCheck.sanitized?.destinationUrl, 'https://sponsor.example.com/deals');
-
-  const unsafeDestCheck = validateAdPayload({
-    adType: 'banner',
-    placementId: 'plc_footer_1',
-    width: '300px',
-    height: '250px',
-    status: 'active',
-    priority: 10,
-    destinationUrl: 'javascript:alert(document.cookie)',
-    scriptCode: '<img src="https://cdn.example.com/ad.png" />',
-  });
-  assert.equal(unsafeDestCheck.valid, false);
-
-  // 4. Click behavior & sandbox isolation in buildSandboxedAdSrcDoc
+  // 3. Click behavior & sandbox isolation in buildSandboxedAdSrcDoc
   assert.equal(hasOwnInteractiveOrScriptElements('<img src="https://cdn.example.com/ad.png" />'), false);
   assert.equal(
     hasOwnInteractiveOrScriptElements('<a href="https://native.example.com"><img src="https://cdn.example.com/ad.png" /></a>'),
@@ -1155,34 +846,14 @@ test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects
     /<a class="imagelab-ad-link" href="https:\/\/landing\.example\.com\/\?ref=imagelab" target="_blank" rel="noopener noreferrer"><img src="https:\/\/cdn\.example\.com\/promo\.webp"/
   );
 
-  // Custom HTML already having <a> + destinationUrl -> preserves original anchor without double-wrapping
-  const existingLinkHtml = buildSandboxedAdSrcDoc({
-    id: 'ad_html_1',
-    name: 'Custom Ad',
-    provider: 'Custom Ad',
-    adType: 'custom_html_js',
-    scriptCode: '<a href="https://original.example.com"><span>Click Original</span></a>',
-    destinationUrl: 'https://override-should-not-wrap.example.com',
-    placementId: 'plc_1',
-    width: 'auto',
-    height: 'auto',
-    status: 'active',
-    priority: 1,
-    createdAt: '',
-    updatedAt: '',
-  });
-  assert.doesNotMatch(existingLinkHtml, /class="imagelab-ad-link"/);
-  assert.doesNotMatch(existingLinkHtml, /override-should-not-wrap/);
-  assert.match(existingLinkHtml, /href="https:\/\/original\.example\.com"/);
-
-  // Adsterra script + destinationUrl -> preserves script untouched without wrapping
+  // Adsterra script preserves invocation untouched without wrapping
   const adsterraHtml = buildSandboxedAdSrcDoc({
     id: 'ad_adsterra_1',
     name: 'Adsterra Banner',
     provider: 'Adsterra',
     adType: 'banner',
-    scriptCode: `<script type="text/javascript">atOptions={'key':'k1'};</script><script src="//www.highperformanceformat.com/k1/invoke.js"></script>`,
-    destinationUrl: 'https://ignored-when-script.example.com',
+    scriptCode: `<script type="text/javascript">var atOptions={'key':'k1'};</script><script src="https://bicea.org/22/k1"></script>`,
+    destinationUrl: '',
     placementId: 'plc_1',
     width: '300px',
     height: '250px',
@@ -1192,31 +863,18 @@ test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects
     updatedAt: '',
   });
   assert.doesNotMatch(adsterraHtml, /class="imagelab-ad-link"/);
-  assert.doesNotMatch(adsterraHtml, /ignored-when-script/);
-  assert.match(adsterraHtml, /highperformanceformat\.com\/k1\/invoke\.js/);
+  assert.match(adsterraHtml, /bicea\.org\/22\/k1/);
 
   // normalizeCreativeMarkup leaves HTML untouched and converts standalone image URL
   assert.match(normalizeCreativeMarkup('https://cdn.example.com/a.jpg'), /^<img src="https:\/\/cdn\.example\.com\/a\.jpg"/);
   assert.equal(normalizeCreativeMarkup('<div>Hi</div>'), '<div>Hi</div>');
 
-  // 5. Simplified Add/Edit modal removes Name & Provider inputs while keeping Destination URL & Live Preview
-  const workspaceSource = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/components/AdsManagerWorkspace.tsx'),
-    'utf-8'
-  );
-  const modalSlice = workspaceSource.slice(workspaceSource.indexOf('{/* Create / Edit Advertisement Modal */}'));
-  assert.doesNotMatch(modalSlice, /Advertisement Name/);
-  assert.doesNotMatch(modalSlice, /Ad Provider/);
-  assert.match(modalSlice, /Destination URL/);
-  assert.match(modalSlice, /Preview Advertisement/);
-  assert.match(modalSlice, /Selected Website Placement/);
-
-  // 6. Public empty-ad collapsing on real errors/no-fill/rendering_blocked while allowing verified/external-URL frames to render live at configured dimensions
+  // 4. Public empty-ad collapsing on real errors/no-fill/rendering_blocked while keeping strict sandbox
   const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
   assert.match(adSlotSource, /LivePublicAdItem/);
   assert.match(
     adSlotSource,
-    /status === 'no_inventory' \|\|\s*status === 'rendering_blocked' \|\|\s*status === 'script_blocked' \|\|\s*status === 'error'/
+    /TERMINAL_FAILED_STATUSES[\s\S]*'no_inventory'[\s\S]*'rendering_blocked'[\s\S]*'script_blocked'[\s\S]*'error'/
   );
   assert.match(
     adSlotSource,
@@ -1232,13 +890,6 @@ test('20. Simplified Ads Manager form removes Name/Provider inputs, auto-detects
   assert.match(injectorSource, /PlacementAdPortalGroup/);
   assert.match(injectorSource, /hasAnyVisible/);
   assert.match(injectorSource, /h-0 overflow-hidden m-0 p-0/);
-
-  const overlaySource = fs.readFileSync(
-    path.resolve(process.cwd(), 'src/components/VisualPlacementOverlay.tsx'),
-    'utf-8'
-  );
-  assert.match(overlaySource, /Preview Slot Area on Page|Preview Your Draft Ad Inside This Area/);
-  assert.match(overlaySource, /returnTo/);
 });
 
 test('21. Two-column 9:16 Instagram-style gallery, image-only tiles, authenticated Copy Full Prompt, and strict prompt-secret isolation hold', async () => {
@@ -1373,60 +1024,388 @@ test('22. Adsterra official code parsing, friendly about:blank isolation bridge,
   assert.match(srcDoc, /securitypolicyviolation/);
   // Must NEVER treat an empty about:blank nested <iframe> tag alone as 'loaded' or 'preview_unsupported'
   assert.match(srcDoc, /NEVER treat an <iframe> tag or empty about:blank frame as rendered visible creative/);
+  assert.match(srcDoc, /postStatus\(\s*'script_request_started'/);
   assert.match(srcDoc, /postStatus\(\s*'script_loaded'/);
   assert.match(srcDoc, /postStatus\(\s*'iframe_created'/);
   assert.match(srcDoc, /postStatus\(\s*'loaded'/);
   assert.match(srcDoc, /postStatus\(\s*'rendering_blocked'/);
   assert.match(srcDoc, /postStatus\(\s*'script_blocked'/);
+  assert.match(srcDoc, /postStatus\(\s*'timeout'/);
   assert.match(srcDoc, /postStatus\(\s*'error'/);
   assert.match(srcDoc, /postStatus\(\s*'preview_unsupported'/);
   assert.match(srcDoc, /postStatus\(\s*'no_inventory'/);
   assert.match(srcDoc, /postStatus\(\s*'popunder_ready'/);
 
-  // 4. Audience safety & URL hygiene validation rejects hijack redirects / adult keywords and strips invisible formatting chars
+  // Extended non-premature probe window (8s initial + 12s pending grace) and structured per-zone diagnostics
+  assert.match(srcDoc, /run\(true\);\s*\},\s*8000\)/);
+  assert.match(srcDoc, /12000\s*-\s*elapsed/);
+  assert.match(srcDoc, /imagelab-ad-diagnostic/);
+  for (const diagEvent of [
+    'script_request_started',
+    'script_loaded',
+    'script_failed',
+    'nested_iframe_created',
+    'creative_rendered',
+    'empty_response',
+    'timeout',
+    'browser_restriction',
+  ]) {
+    assert.ok(srcDoc.includes(`'${diagEvent}'`), `Missing diagnostic milestone: ${diagEvent}`);
+  }
+
+  // 4. URL hygiene validation strips invisible formatting characters
   const dirtyUrlCheck = validateSafeHttpUrl('https://example.com/offer\u2060');
   assert.equal(dirtyUrlCheck.valid, true);
   assert.equal(dirtyUrlCheck.sanitized, 'https://example.com/offer');
 
-  const hijackPayload = validateAdPayload({
-    adType: 'custom_html_js',
-    scriptCode: '<script>window.top.location = "https://spam.example.com";</script>',
-    placementId: 'plc_1',
-    width: '300px',
-    height: '250px',
-    status: 'active',
-    priority: 10,
-  });
-  assert.equal(hijackPayload.valid, false);
-  assert.match(hijackPayload.error || '', /top-frame navigation hijack/i);
-
-  const adultPayload = validateAdPayload({
-    adType: 'banner',
-    scriptCode: '<a href="https://example.com/xxx-promo">Banner</a>',
-    placementId: 'plc_1',
-    width: '300px',
-    height: '250px',
-    status: 'active',
-    priority: 10,
-  });
-  assert.equal(adultPayload.valid, false);
-  assert.match(adultPayload.error || '', /audience/i);
-
-  // 5. AdSlot UI distinguishes all required states, keeps custom/image banners visible, explains published testing for unsupported providers, and preserves strict sandbox isolation
+  // 5. AdSlot enforces strict sandbox isolation and exposes per-unit render status diagnostics
   const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
   assert.doesNotMatch(adSlotSource, /allow-same-origin/);
   assert.doesNotMatch(adSlotSource, /Creative rendered inside sandboxed iframe/);
-  assert.match(adSlotSource, /Script Loaded/);
-  assert.match(adSlotSource, /Iframe Created/);
-  assert.match(adSlotSource, /Preview Unsupported/);
-  assert.match(adSlotSource, /Live preview unavailable for this advertising provider\./);
-  assert.match(adSlotSource, /save this advertisement and test it on the actual published website/);
-  assert.match(adSlotSource, /Ad Rendered/);
-  assert.match(adSlotSource, /Rendering Blocked/);
-  assert.match(adSlotSource, /No Inventory/);
-  assert.match(adSlotSource, /Script Blocked/);
-  assert.match(adSlotSource, /Script Error/);
+  assert.match(adSlotSource, /data-imagelab-ad-unit/);
+  assert.match(adSlotSource, /data-ad-zone-key/);
+  assert.match(adSlotSource, /data-ad-render-status/);
+  assert.match(adSlotSource, /__imagelabAdDiagnostics/);
+  assert.match(adSlotSource, /imagelab-ad-diagnostic/);
   assert.match(adSlotSource, /ResizeObserver/);
-  assert.match(adSlotSource, /max-w-\[375px\]/);
+  assert.match(adSlotSource, /frame\.removeAttribute\('srcdoc'\)/);
 });
+
+test('23. Five exact automatic Adsterra zones, independent sandbox lifecycles, responsive viewport gating, and public-only routing hold', () => {
+  // 1. Exact 5 supplied Adsterra zones (keys, script URLs, sizes, default placements)
+  assert.equal(ADSTERRA_ZONES.length, 5);
+  assert.deepEqual(
+    ADSTERRA_ZONES.map((z) => ({
+      zoneNumber: z.zoneNumber,
+      zoneKey: z.zoneKey,
+      scriptUrl: z.scriptUrl,
+      width: z.width,
+      height: z.height,
+      deviceTarget: z.deviceTarget,
+    })),
+    [
+      {
+        zoneNumber: 1,
+        zoneKey: '9bf275cec2fca23dd811c4ea8b659006',
+        scriptUrl: 'https://bicea.org/22/9bf275cec2fca23dd811c4ea8b659006',
+        width: '468px',
+        height: '60px',
+        deviceTarget: 'desktop',
+      },
+      {
+        zoneNumber: 2,
+        zoneKey: '8f006a55a574a4657b9c0b877e503a54',
+        scriptUrl: 'https://bicea.org/22/8f006a55a574a4657b9c0b877e503a54',
+        width: '728px',
+        height: '90px',
+        deviceTarget: 'desktop',
+      },
+      {
+        zoneNumber: 3,
+        zoneKey: '1c30969d7c004ca503ae6460010eb760',
+        scriptUrl: 'https://bicea.org/22/1c30969d7c004ca503ae6460010eb760',
+        width: '320px',
+        height: '50px',
+        deviceTarget: 'mobile',
+      },
+      {
+        zoneNumber: 4,
+        zoneKey: '4606ed44271ecec8b5f053ee87806f78',
+        scriptUrl: 'https://bicea.org/22/4606ed44271ecec8b5f053ee87806f78',
+        width: '160px',
+        height: '600px',
+        deviceTarget: 'desktop',
+      },
+      {
+        zoneNumber: 5,
+        zoneKey: '873ad292a31a1a1dee93fce99c7c7ff0',
+        scriptUrl: 'https://bicea.org/22/873ad292a31a1a1dee93fce99c7c7ff0',
+        width: '300px',
+        height: '250px',
+        deviceTarget: 'all',
+      },
+    ]
+  );
+
+  // 2. Each zone builds an independent atOptions script + isolated srcDoc with deduplication & unload cleanup
+  for (const zone of ADSTERRA_ZONES) {
+    assert.equal(ADSTERRA_ZONES_BY_ID.has(zone.id), true);
+    const script = buildAdsterraZoneScript(zone);
+    assert.match(script, /\batOptions\s*=\s*\{/);
+    assert.match(script, new RegExp(`'key'\\s*:\\s*'${zone.zoneKey}'`));
+    assert.match(script, /'format'\s*:\s*'iframe'/);
+    assert.match(script, new RegExp(`'height'\\s*:\\s*${zone.heightPx}`));
+    assert.match(script, new RegExp(`'width'\\s*:\\s*${zone.widthPx}`));
+    assert.match(script, /'params'\s*:\s*\{\}/);
+    assert.ok(script.includes(`<script src="${zone.scriptUrl}"></script>`));
+    assert.ok(script.indexOf('atOptions = {') < script.indexOf(zone.scriptUrl));
+
+    const adRec = buildDefaultAdsterraAdRecord(zone);
+    assert.equal(extractAdsterraZoneKey(adRec), zone.zoneKey);
+    const frameHtml = buildSandboxedAdSrcDoc(adRec, { isHttps: true });
+    assert.match(frameHtml, new RegExp(zone.zoneKey));
+    assert.match(frameHtml, /seenScriptUrls/);
+    assert.match(frameHtml, /pagehide/);
+    assert.match(frameHtml, /disposeAll/);
+  }
+
+  // 3. Static predefined state matches the 5 placements & 5 zones cleanly
+  const builtinState = getBuiltinAdsterraState();
+  assert.equal(builtinState.placements.length, 5);
+  assert.equal(builtinState.ads.length, 5);
+
+  // 4. Responsive viewport routing prevents desktop/mobile double-loading
+  assert.equal(getPlacementDeviceTarget(BUILTIN_AD_PLACEMENTS[0]), 'desktop'); // 468x60 desktop header
+  assert.equal(getPlacementDeviceTarget(BUILTIN_AD_PLACEMENTS[1]), 'mobile'); // 320x50 mobile header
+  assert.equal(getPlacementDeviceTarget(BUILTIN_AD_PLACEMENTS[2]), 'desktop'); // 728x90 desktop home
+  assert.equal(getPlacementDeviceTarget(BUILTIN_AD_PLACEMENTS[3]), 'all'); // 300x250 content gallery
+  assert.equal(getPlacementDeviceTarget(BUILTIN_AD_PLACEMENTS[4]), 'desktop'); // 160x600 desktop sidebar
+
+  // 5. Required DOM placement slots, responsive classes, host reuse, and public-only gating exist
+  const appSource = fs.readFileSync(path.resolve(process.cwd(), 'src/App.tsx'), 'utf-8');
+  assert.match(appSource, /showPublicAds &&/);
+  assert.match(appSource, /data-ad-slot="desktop_header_banner"/);
+  assert.match(appSource, /data-ad-slot="mobile_header_banner"/);
+  assert.doesNotMatch(appSource, /\/admin\/ads/);
+
+  const homeSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/HomePage.tsx'), 'utf-8');
+  assert.match(homeSource, /data-ad-slot="desktop_homepage_banner"/);
+  assert.match(homeSource, /data-ad-slot="homepage_gallery_banner"/);
+  assert.match(homeSource, /data-ad-slot="desktop_sidebar_banner"/);
+
+  const injectorSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/VisualAdInjector.tsx'), 'utf-8');
+  assert.match(injectorSource, /matchMedia\('\(min-width: 1024px\)'\)/);
+  assert.match(injectorSource, /seenZoneKeys/);
+  assert.match(injectorSource, /isPublicAdRoute/);
+  assert.match(injectorSource, /\['\/admin', '\/super-admin', '\/login', '\/signup'\]/);
+  assert.doesNotMatch(injectorSource, /location\.search/);
+
+  const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
+  assert.match(adSlotSource, /aspectRatio/);
+  assert.match(adSlotSource, /frame\.src = 'about:blank'/);
+  assert.match(adSlotSource, /onStatusChange\?:\s*\(status:\s*AdRenderStatus/);
+  assert.match(adSlotSource, /'timeout'/);
+});
+
+test('24. Interactive 3D ImageLab landing shelf, real category filtering, responsive geometry, fine-pointer cursor, and prompt privacy hold', () => {
+  // 1. Real category derivation never creates empty or fake categories
+  assert.deepEqual(deriveShelfCategories([]), []);
+  const categories = deriveShelfCategories(READY_MADE_PROMPTS);
+  assert.ok(categories.length >= 4);
+  for (const cat of categories) {
+    assert.ok(cat.items.length > 0, `Category ${cat.id} must have >= 1 item`);
+  }
+  assert.equal(categories.some((c) => c.id === 'community'), false);
+
+  // 2. Wrap-around stepping, circular shelf offsets, swipe direction, and preload indices
+  assert.equal(stepShelfIndex(0, -1, 14), 13);
+  assert.equal(stepShelfIndex(13, 1, 14), 0);
+  assert.equal(computeShelfOffset(13, 0, 14), -1);
+  assert.equal(computeShelfOffset(0, 13, 14), 1);
+  assert.equal(resolveSwipeStep(-60), 1);
+  assert.equal(resolveSwipeStep(60), -1);
+  assert.equal(resolveSwipeStep(12), 0);
+  assert.deepEqual(getPreloadIndices(0, 14), [13, 0, 1]);
+
+  // 3. 3D card transform focuses active item forward facing viewer, angles neighbors, and flattens on reduced motion
+  for (const vpWidth of [360, 390, 430, 768, 1024, 1440]) {
+    const activeTx = computeShelfCardTransform(0, {
+      cardWidth: vpWidth < 640 ? 188 : 276,
+      viewportWidth: vpWidth,
+      tiltX: 2.5,
+      tiltY: -3.2,
+    });
+    assert.equal(activeTx.isActive, true);
+    assert.equal(activeTx.visible, true);
+    assert.ok(activeTx.translateZ > 0);
+    assert.equal(activeTx.scale, 1);
+
+    const sideTx = computeShelfCardTransform(1, {
+      cardWidth: vpWidth < 640 ? 188 : 276,
+      viewportWidth: vpWidth,
+    });
+    assert.equal(sideTx.isActive, false);
+    assert.ok(sideTx.translateX > 0);
+    assert.ok(sideTx.rotateY < 0);
+    assert.ok(sideTx.scale < 1);
+  }
+
+  const reducedTx = computeShelfCardTransform(0, {
+    cardWidth: 276,
+    viewportWidth: 1440,
+    prefersReducedMotion: true,
+    tiltX: 4,
+    tiltY: 4,
+  });
+  assert.equal(reducedTx.rotateX, 0);
+  assert.equal(reducedTx.rotateY, 0);
+
+  // 4. Editorial subtitle never exposes promptText
+  const subtitle = formatPublicEditorialSubtitle(READY_MADE_PROMPTS[0]);
+  assert.equal(subtitle.includes('promptText'), false);
+
+  // 5. Component & CSS verification: zero VHS/Leon Vasari/movie leakage, zero promptText leakage, 9:16 portrait shelf cards, fine-pointer cursor, non-overlapping mobile buttons
+  const shelfSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/HeroShelf3D.tsx'), 'utf-8');
+  const cursorSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/LandingCursor.tsx'), 'utf-8');
+  const homeSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/HomePage.tsx'), 'utf-8');
+  const cssSource = fs.readFileSync(path.resolve(process.cwd(), 'src/index.css'), 'utf-8');
+
+  const combined = `${shelfSource}\n${cursorSource}\n${homeSource}`;
+  assert.doesNotMatch(combined, /Leon Vasari|VHS|Filmography|movie|director/i);
+  assert.doesNotMatch(combined, /promptText/);
+  assert.match(shelfSource, /aspect-\[9\/16\]/);
+  assert.match(shelfSource, /object-cover/);
+  assert.match(shelfSource, /No Published Artworks Yet/);
+  assert.match(shelfSource, /overflow-x-clip/);
+  assert.match(shelfSource, /createPortal/);
+  assert.match(shelfSource, /OPEN/);
+  assert.match(shelfSource, /aria-label="Previous artwork"[\s\S]{0,160}md:hidden/);
+
+  assert.match(cursorSource, /\(hover: hover\) and \(pointer: fine\)/);
+  assert.match(cursorSource, /requestAnimationFrame/);
+  assert.match(cursorSource, /cancelAnimationFrame/);
+  assert.match(cursorSource, /OPEN/);
+  assert.match(cssSource, /@media \(hover: hover\) and \(pointer: fine\)/);
+});
+
+test('25. Cross-browser clipboard fallback, sync-activation unlock prefetch, manual-copy recovery, and extended ad-frame diagnostics hold', async () => {
+  const { copyTextWithFallback } = await import('../src/lib/clipboard.ts');
+
+  // 1. Empty text fails safely without throwing
+  const emptyResult = await copyTextWithFallback('');
+  assert.equal(emptyResult.ok, false);
+  assert.equal(emptyResult.reason, 'empty_text');
+
+  // 2. Secure-context Clipboard API success
+  const originalWindow = globalThis.window;
+  const originalNavigator = globalThis.navigator;
+  const originalDocument = globalThis.document;
+
+  try {
+    let writtenText = '';
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { isSecureContext: true, getSelection: () => null },
+    });
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: async (text: string) => {
+            writtenText = text;
+          },
+        },
+      },
+    });
+    const okRes = await copyTextWithFallback('editorial travertine courtyard prompt');
+    assert.equal(okRes.ok, true);
+    assert.equal(okRes.method, 'clipboard-api');
+    assert.equal(writtenText, 'editorial travertine courtyard prompt');
+
+    // 3. When Clipboard API throws NotAllowedError, falls back to execCommand cleanly
+    let appendedTag = '';
+    let execCommandCalled = false;
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: async () => {
+            throw new Error('NotAllowedError');
+          },
+        },
+      },
+    });
+    const fakeTextarea = {
+      value: '',
+      style: {} as Record<string, string>,
+      setAttribute: () => {},
+      focus: () => {},
+      select: () => {},
+      setSelectionRange: () => {},
+    };
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      value: {
+        activeElement: null,
+        body: {
+          appendChild: (el: unknown) => {
+            appendedTag = el === fakeTextarea ? 'textarea' : 'other';
+          },
+          removeChild: () => {},
+        },
+        createElement: (tag: string) => {
+          assert.equal(tag, 'textarea');
+          return fakeTextarea;
+        },
+        execCommand: (cmd: string) => {
+          execCommandCalled = cmd === 'copy';
+          return true;
+        },
+      },
+    });
+
+    const fallbackRes = await copyTextWithFallback('fallback prompt text');
+    assert.equal(fallbackRes.ok, true);
+    assert.equal(fallbackRes.method, 'exec-command');
+    assert.equal(appendedTag, 'textarea');
+    assert.equal(execCommandCalled, true);
+
+    // 4. When both Clipboard API and execCommand are blocked, returns ok: false honestly
+    Object.defineProperty(globalThis, 'document', {
+      configurable: true,
+      value: {
+        activeElement: null,
+        body: { appendChild: () => {}, removeChild: () => {} },
+        createElement: () => fakeTextarea,
+        execCommand: () => false,
+      },
+    });
+    const blockedRes = await copyTextWithFallback('blocked prompt text');
+    assert.equal(blockedRes.ok, false);
+    assert.equal(blockedRes.method, 'none');
+    assert.equal(blockedRes.reason, 'clipboard_blocked');
+  } finally {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: originalNavigator });
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: originalDocument });
+  }
+
+  // 5. AppContext & PromptDetailsPage enforce auth-only prefetch, sync clipboard path, and manual-copy fallback
+  const appCtxSource = fs.readFileSync(path.resolve(process.cwd(), 'src/context/AppContext.tsx'), 'utf-8');
+  assert.match(appCtxSource, /copyTextWithFallback/);
+  assert.match(appCtxSource, /unlockPrompt/);
+  assert.match(appCtxSource, /unlockedPromptsRef\.current\[id\]/);
+  assert.match(appCtxSource, /clipboardErrorId/);
+  assert.match(appCtxSource, /Prompt copied successfully!/);
+
+  const detailsSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/PromptDetailsPage.tsx'), 'utf-8');
+  assert.match(detailsSource, /unlockPrompt\(id,\s*\{\s*silent:\s*true\s*\}\)/);
+  assert.match(detailsSource, /manual-copy-prompt-field/);
+  assert.match(detailsSource, /selectElementText/);
+  assert.match(detailsSource, /Prompt copied successfully!/);
+
+  // 6. Adsterra diagnostics classify all 5 outcomes, support HTML-parsed about:blank frames, and gate verbose logs in DEV
+  const frameSource = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/adFrameHtml.ts'), 'utf-8');
+  assert.match(frameSource, /HTMLIFrameElement\.prototype/);
+  assert.match(frameSource, /resolveOutcomeCategory/);
+  assert.match(frameSource, /earlyScriptStates/);
+  assert.match(frameSource, /lookupScriptResponseStatus/);
+  for (const cat of ['script_loaded', 'iframe_created', 'creative_rendered', 'no_inventory', 'blocked_rendering']) {
+    assert.ok(frameSource.includes(`'${cat}'`), `Missing diagnostic outcomeCategory: ${cat}`);
+  }
+
+  const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
+  assert.match(adSlotSource, /import\.meta\.env\?\.DEV/);
+  assert.match(adSlotSource, /data-ad-placement-id/);
+  assert.match(adSlotSource, /data-ad-outcome/);
+  assert.match(adSlotSource, /data-ad-response-status/);
+  assert.match(adSlotSource, /cleanup_unmounted/);
+
+  const injectorSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/VisualAdInjector.tsx'), 'utf-8');
+  assert.match(injectorSource, /IS_DEV_INJECTOR/);
+  assert.match(injectorSource, /placementId=\{placement\.id\}/);
+  assert.match(injectorSource, /slotId=\{placement\.slotId\}/);
+});
+
+
 

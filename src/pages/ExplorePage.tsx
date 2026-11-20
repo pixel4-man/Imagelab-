@@ -158,28 +158,35 @@ export function ExplorePage() {
             onAction={resetAllFilters}
           />
         ) : (
-          <div className="space-y-6 sm:space-y-8">
-            <section
-              data-ad-slot="explore_gallery"
-              data-ad-label="Explore Gallery Grid"
-              className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6"
-            >
-              {filteredPrompts.slice(0, 6).map((prompt) => (
-                <PromptCard key={prompt.id} prompt={prompt} />
-              ))}
-            </section>
-
-            {filteredPrompts.length > 6 && (
+          <div className="flex flex-col lg:flex-row lg:items-start [&:has(aside[data-ad-has-visible='true'])]:gap-6">
+            <div className="flex-1 min-w-0 space-y-6 sm:space-y-8">
               <section
-                data-ad-slot="explore_gallery_bottom"
-                data-ad-label="Explore Extended Gallery"
+                data-ad-slot="explore_gallery"
+                data-ad-label="Explore Gallery Grid"
                 className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6"
               >
-                {filteredPrompts.slice(6).map((prompt) => (
+                {filteredPrompts.slice(0, 6).map((prompt) => (
                   <PromptCard key={prompt.id} prompt={prompt} />
                 ))}
               </section>
-            )}
+
+              {filteredPrompts.length > 6 && (
+                <section
+                  data-ad-slot="explore_gallery_bottom"
+                  data-ad-label="Explore Extended Gallery"
+                  className="grid grid-cols-2 gap-3.5 sm:gap-5 lg:gap-6"
+                >
+                  {filteredPrompts.slice(6).map((prompt) => (
+                    <PromptCard key={prompt.id} prompt={prompt} />
+                  ))}
+                </section>
+              )}
+            </div>
+            <aside
+              data-ad-slot="desktop_sidebar_banner"
+              data-ad-label="Desktop Sidebar Banner (160×600)"
+              className="hidden lg:block shrink-0 w-0 overflow-hidden [&[data-ad-has-visible='true']]:w-[196px] [&[data-ad-has-visible='true']]:overflow-visible lg:sticky lg:top-24"
+            />
           </div>
         )}
       </div>

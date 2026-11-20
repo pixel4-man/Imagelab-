@@ -9,7 +9,6 @@ import {
   Info,
   LogOut,
   Mail,
-  Megaphone,
   Menu,
   PlusCircle,
   Shield,
@@ -265,14 +264,6 @@ export function Navbar() {
                             <span>Admin Dashboard</span>
                           </Link>
                           <Link
-                            to="/admin/ads"
-                            role="menuitem"
-                            className="flex items-center gap-2.5 px-4 py-2 text-xs font-semibold text-[#264653] hover:bg-[#F4EDE4]"
-                          >
-                            <Megaphone className="w-4 h-4 text-[#E76F51]" aria-hidden="true" />
-                            <span>Ads Manager</span>
-                          </Link>
-                          <Link
                             to="/admin?tab=official"
                             role="menuitem"
                             className="flex items-center gap-2.5 px-4 py-2 text-xs font-semibold text-[#264653] hover:bg-[#F4EDE4]"
@@ -497,21 +488,6 @@ export function Navbar() {
                       >
                         <Shield className="w-4 h-4 text-[#2A9D8F] shrink-0" aria-hidden="true" />
                         <span>Admin Dashboard</span>
-                      </NavLink>
-
-                      <NavLink
-                        to="/admin/ads"
-                        onClick={() => setDrawerOpen(false)}
-                        className={({ isActive }) =>
-                          `flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-semibold min-h-[46px] transition-colors ${
-                            isActive
-                              ? 'bg-[#264653] text-[#FAF7F2]'
-                              : 'text-[#264653] hover:bg-[#F4EDE4]'
-                          }`
-                        }
-                      >
-                        <Megaphone className="w-4 h-4 text-[#E76F51] shrink-0" aria-hidden="true" />
-                        <span>Ads Manager</span>
                       </NavLink>
 
                       <NavLink

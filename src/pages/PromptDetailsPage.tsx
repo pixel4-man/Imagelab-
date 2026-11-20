@@ -31,6 +31,7 @@ import {
 } from '../components/SeoHead';
 import { useApp } from '../context/AppContext';
 import { useAuth } from '../context/AuthContext';
+import { selectElementText } from '../lib/clipboard';
 import { db } from '../lib/firebase';
 import { resolvePersistableArtworkUrl } from '../lib/imageUpload';
 import { PromptItem } from '../types/prompt';
@@ -52,9 +53,11 @@ export function PromptDetailsPage() {
     likedIds,
     savedIds,
     copiedId,
+    clipboardErrorId,
     unlockedPrompts,
     toggleLike,
     toggleSave,
+    unlockPrompt,
     copyPrompt,
     refreshPublicPrompts,
     removePromptLocally,
@@ -76,6 +79,7 @@ export function PromptDetailsPage() {
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [copyingPrompt, setCopyingPrompt] = useState(false);
   const [copySuccessBanner, setCopySuccessBanner] = useState(false);
+  const manualCopyTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Admin & Owner management modals
   const [editModalOpen, setEditModalOpen] = useState(false);
@@ -98,6 +102,14 @@ export function PromptDetailsPage() {
   useEffect(() => {
     setCopySuccessBanner(false);
   }, [id, firebaseUser]);
+
+  // Eagerly unlock the authorized prompt when a signed-in user opens the detail page so
+  // clicking "Copy Full Prompt" writes to the clipboard synchronously inside the user gesture.
+  useEffect(() => {
+    if (!firebaseUser || !id) return;
+    if (unlockedPrompts[id]) return;
+    void unlockPrompt(id, { silent: true });
+  }, [firebaseUser, id, unlockedPrompts, unlockPrompt]);
 
   useEffect(() => {
     let active = true;
@@ -474,6 +486,7 @@ export function PromptDetailsPage() {
   const isLiked = likedIds.includes(prompt.id);
   const isSaved = savedIds.includes(prompt.id);
   const isCopied = copiedId === prompt.id;
+  const hasClipboardError = Boolean(firebaseUser && clipboardErrorId === prompt.id);
   const isPublished = (prompt.status || 'approved') === 'approved';
   const canonicalOrigin = resolveCanonicalOrigin();
   const canonicalPromptPath = `/prompt/${encodeURIComponent(prompt.id)}`;
@@ -491,11 +504,16 @@ export function PromptDetailsPage() {
       return;
     }
 
+    setCopySuccessBanner(false);
     setCopyingPrompt(true);
     try {
       const ok = await copyPrompt(prompt.id);
       if (ok) {
         setCopySuccessBanner(true);
+      } else {
+        window.requestAnimationFrame(() => {
+          selectElementText(manualCopyTextareaRef.current);
+        });
       }
     } finally {
       setCopyingPrompt(false);
@@ -737,13 +755,29 @@ export function PromptDetailsPage() {
                 </button>
               </div>
 
-              {(copySuccessBanner || isCopied) && (
+              {(copySuccessBanner || isCopied) && !hasClipboardError && (
                 <div
                   role="status"
                   className="rounded-xl bg-[#2A9D8F]/12 border border-[#2A9D8F]/30 px-3.5 py-2.5 flex items-center gap-2 text-xs font-semibold text-[#218175]"
                 >
                   <Check className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <span>Prompt copied successfully</span>
+                  <span>Prompt copied successfully!</span>
+                </div>
+              )}
+
+              {hasClipboardError && (
+                <div
+                  role="alert"
+                  className="rounded-xl bg-[#E76F51]/12 border border-[#E76F51]/35 px-3.5 py-3 space-y-2 text-xs text-[#264653]"
+                >
+                  <p className="font-semibold text-[#D05A3C]">
+                    Clipboard permission or browser restriction prevented automatic copying.
+                  </p>
+                  <p className="text-[#264653]/80">
+                    {unlockedPromptText
+                      ? 'Use the selectable field below to copy manually, or tap "Copy Full Prompt" again.'
+                      : 'Sign in or try tapping "Copy Full Prompt" again.'}
+                  </p>
                 </div>
               )}
 
@@ -754,6 +788,34 @@ export function PromptDetailsPage() {
                     <span>
                       This prompt is protected. Click <strong>Copy Full Prompt</strong> to sign in or create a free account and return here to copy it.
                     </span>
+                  </div>
+                ) : hasClipboardError && unlockedPromptText ? (
+                  <div className="space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <label
+                        htmlFor="manual-copy-prompt-field"
+                        className="text-xs font-semibold text-[#264653]"
+                      >
+                        Manual Copy Prompt Text
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => selectElementText(manualCopyTextareaRef.current)}
+                        className="px-2.5 py-1 rounded-lg bg-[#264653] hover:bg-[#355C6B] text-[#FAF7F2] text-xs font-semibold transition-colors"
+                      >
+                        Select Text
+                      </button>
+                    </div>
+                    <textarea
+                      id="manual-copy-prompt-field"
+                      ref={manualCopyTextareaRef}
+                      readOnly
+                      rows={5}
+                      value={unlockedPromptText}
+                      onFocus={(e) => selectElementText(e.currentTarget)}
+                      onClick={(e) => selectElementText(e.currentTarget)}
+                      className="w-full p-3 rounded-xl bg-[#FAF7F2] border border-[#E76F51]/40 font-sans font-normal text-sm leading-relaxed text-[#264653] focus:outline-none focus:ring-2 focus:ring-[#E76F51]"
+                    />
                   </div>
                 ) : unlockedPromptText ? (
                   <p className="font-sans font-normal text-sm sm:text-[15px] leading-relaxed text-[#264653] whitespace-pre-wrap select-all">

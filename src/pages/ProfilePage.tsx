@@ -366,12 +366,6 @@ export function ProfilePage() {
                     Admin Dashboard
                   </Link>
                   <Link
-                    to="/admin/ads"
-                    className="px-3.5 py-2 rounded-xl bg-[#E76F51] hover:bg-[#D05A3C] text-white text-xs font-semibold transition-colors"
-                  >
-                    Ads Manager
-                  </Link>
-                  <Link
                     to="/admin?tab=official"
                     className="px-3.5 py-2 rounded-xl bg-[#2A9D8F] hover:bg-[#218175] text-white text-xs font-semibold transition-colors"
                   >

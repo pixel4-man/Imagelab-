@@ -1,6 +1,7 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { collection, doc, getDoc, onSnapshot, query, where } from 'firebase/firestore';
 import { CREATORS, INITIAL_PROMPTS } from '../data/prompts';
+import { copyTextWithFallback } from '../lib/clipboard';
 import { db } from '../lib/firebase';
 import { useAuth } from './AuthContext';
 import { CreatorProfile, PromptItem } from '../types/prompt';
@@ -16,12 +17,14 @@ interface AppContextValue {
   likedIds: string[];
   savedIds: string[];
   copiedId: string | null;
+  clipboardErrorId: string | null;
   unlockedPrompts: Record<string, string>;
   toast: ToastState | null;
   activeUserProfile: CreatorProfile;
   getCreator: (username: string) => CreatorProfile;
   toggleLike: (id: string) => void;
   toggleSave: (id: string) => void;
+  unlockPrompt: (id: string, options?: { silent?: boolean }) => Promise<string | null>;
   copyPrompt: (id: string) => Promise<boolean>;
   refreshPublicPrompts: () => Promise<void>;
   removePromptLocally: (id: string) => void;
@@ -69,24 +72,6 @@ function toIsoDate(val: unknown): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-async function writeTextToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  document.body.appendChild(textarea);
-  textarea.select();
-  const ok = document.execCommand('copy');
-  document.body.removeChild(textarea);
-  if (!ok) {
-    throw new Error('Clipboard copy failed');
-  }
-}
-
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const { firebaseUser, getIdToken } = useAuth();
   const [sessionPrompts, setSessionPrompts] = useState<PromptItem[]>([]);
@@ -109,7 +94,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   });
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [clipboardErrorId, setClipboardErrorId] = useState<string | null>(null);
   const [unlockedPrompts, setUnlockedPrompts] = useState<Record<string, string>>({});
+  const unlockedPromptsRef = useRef<Record<string, string>>({});
+  unlockedPromptsRef.current = unlockedPrompts;
+  const inFlightUnlocksRef = useRef<Map<string, Promise<string | null>>>(new Map());
   const [toast, setToast] = useState<ToastState | null>(null);
   const [activeUserProfile, setActiveUserProfile] = useState<CreatorProfile>(CREATORS.elenavance);
   const [likeDeltas, setLikeDeltas] = useState<Record<string, number>>({});
@@ -118,6 +107,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!firebaseUser) {
       setUnlockedPrompts({});
+      setClipboardErrorId(null);
+      inFlightUnlocksRef.current.clear();
     }
   }, [firebaseUser]);
 
@@ -315,62 +306,123 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
   };
 
-  const copyPrompt = async (id: string): Promise<boolean> => {
-    if (!firebaseUser) {
-      return false;
-    }
-
-    try {
-      let promptText = unlockedPrompts[id] || '';
-
-      if (!promptText) {
-        const token = await getIdToken();
-        if (!token) {
-          showToast('Please sign in again to copy the full prompt.', 'terracotta');
-          return false;
-        }
-        const res = await fetch(`/api/prompts/${encodeURIComponent(id)}/secret`, {
-          headers: { Authorization: `Bearer ${token}` },
-          cache: 'no-store',
-        });
-        if (res.ok) {
-          const data = (await res.json()) as { promptText?: string };
-          promptText = typeof data.promptText === 'string' ? data.promptText : '';
-        } else if (res.status === 503 && db) {
-          const secretSnap = await getDoc(doc(db, 'promptSecrets', id));
-          if (secretSnap.exists() && typeof secretSnap.data()?.promptText === 'string') {
-            promptText = secretSnap.data().promptText;
-          }
-        } else {
-          const payload = await res.json().catch(() => ({}));
-          showToast(payload.error || 'Unable to unlock prompt right now.', 'terracotta');
-          return false;
-        }
+  const unlockPrompt = useCallback(
+    async (id: string, options: { silent?: boolean } = {}): Promise<string | null> => {
+      const silent = Boolean(options.silent);
+      if (!firebaseUser || !id) {
+        return null;
       }
 
-      if (!promptText) {
-        showToast('Prompt text is unavailable for this artwork.', 'terracotta');
+      const cached = unlockedPromptsRef.current[id];
+      if (cached) {
+        return cached;
+      }
+
+      const existingPromise = inFlightUnlocksRef.current.get(id);
+      if (existingPromise) {
+        return existingPromise;
+      }
+
+      const runUnlock = (async () => {
+        try {
+          const token = await getIdToken();
+          if (!token) {
+            if (!silent) {
+              showToast('Please sign in again to unlock the full prompt.', 'terracotta');
+            }
+            return null;
+          }
+
+          let promptText = '';
+          const res = await fetch(`/api/prompts/${encodeURIComponent(id)}/secret`, {
+            headers: { Authorization: `Bearer ${token}` },
+            cache: 'no-store',
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { promptText?: string };
+            promptText = typeof data.promptText === 'string' ? data.promptText : '';
+          } else if (res.status === 503 && db) {
+            const secretSnap = await getDoc(doc(db, 'promptSecrets', id));
+            if (secretSnap.exists() && typeof secretSnap.data()?.promptText === 'string') {
+              promptText = secretSnap.data().promptText;
+            }
+          } else {
+            if (!silent) {
+              const payload = await res.json().catch(() => ({}));
+              showToast(payload.error || 'Unable to unlock prompt right now.', 'terracotta');
+            }
+            return null;
+          }
+
+          if (!promptText) {
+            if (!silent) {
+              showToast('Prompt text is unavailable for this artwork.', 'terracotta');
+            }
+            return null;
+          }
+
+          setUnlockedPrompts((prev) =>
+            prev[id] === promptText ? prev : { ...prev, [id]: promptText }
+          );
+          return promptText;
+        } catch {
+          if (!silent) {
+            showToast('Unable to unlock prompt right now. Please try again.', 'terracotta');
+          }
+          return null;
+        } finally {
+          inFlightUnlocksRef.current.delete(id);
+        }
+      })();
+
+      inFlightUnlocksRef.current.set(id, runUnlock);
+      return runUnlock;
+    },
+    [firebaseUser, getIdToken]
+  );
+
+  const copyPrompt = useCallback(
+    async (id: string): Promise<boolean> => {
+      if (!firebaseUser) {
         return false;
       }
 
-      await writeTextToClipboard(promptText);
-      setUnlockedPrompts((prev) => ({ ...prev, [id]: promptText }));
-      setCopiedId(id);
-      setCopyDeltas((current) => ({
-        ...current,
-        [id]: (current[id] || 0) + 1,
-      }));
-      showToast('Prompt copied successfully', 'teal');
+      setClipboardErrorId(null);
 
-      window.setTimeout(() => {
-        setCopiedId((current) => (current === id ? null : current));
-      }, 2400);
-      return true;
-    } catch {
-      showToast('Clipboard access blocked. Please allow clipboard permissions and try again.', 'terracotta');
+      // CRITICAL: Check cached prompt synchronously first so `navigator.clipboard.writeText`
+      // starts immediately inside the click interaction before any `await` expires user activation.
+      const cachedPrompt = unlockedPromptsRef.current[id] || '';
+      const promptText = cachedPrompt || (await unlockPrompt(id, { silent: false })) || '';
+
+      if (!promptText) {
+        return false;
+      }
+
+      const result = await copyTextWithFallback(promptText);
+      if (result.ok) {
+        setClipboardErrorId(null);
+        setCopiedId(id);
+        setCopyDeltas((current) => ({
+          ...current,
+          [id]: (current[id] || 0) + 1,
+        }));
+        showToast('Prompt copied successfully!', 'teal');
+
+        window.setTimeout(() => {
+          setCopiedId((current) => (current === id ? null : current));
+        }, 2400);
+        return true;
+      }
+
+      setClipboardErrorId(id);
+      showToast(
+        'Automatic clipboard copy was blocked. Use the selectable prompt box below to copy manually.',
+        'terracotta'
+      );
       return false;
-    }
-  };
+    },
+    [firebaseUser, unlockPrompt]
+  );
 
   const publishPrompt = (
     item: Omit<
@@ -432,12 +484,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         likedIds,
         savedIds,
         copiedId,
+        clipboardErrorId,
         unlockedPrompts,
         toast,
         activeUserProfile,
         getCreator,
         toggleLike,
         toggleSave,
+        unlockPrompt,
         copyPrompt,
         refreshPublicPrompts,
         removePromptLocally,
