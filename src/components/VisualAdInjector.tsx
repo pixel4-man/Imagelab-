@@ -14,6 +14,7 @@ import { AdRecord, VisualPlacementRecord } from '../types/ads';
 import {
   AdRenderStatus,
   LivePublicAdItem,
+  TERMINAL_FAILED_STATUSES,
   matchesPlacementRoute,
 } from './AdSlot';
 
@@ -103,6 +104,10 @@ const PlacementAdPortalGroup = React.memo(function PlacementAdPortalGroup({
   }, []);
 
   const hasAnyVisible = ads.some((a) => visibleMap[a.id]);
+  const hasAnyPending = ads.some((a) => {
+    const st = statusMap[a.id] || 'loading';
+    return !TERMINAL_FAILED_STATUSES.has(st) && st !== 'loaded' && st !== 'preview_unsupported';
+  });
   const aggregateStatus = ads.map((a) => statusMap[a.id] || 'loading').join(',');
 
   useEffect(() => {
@@ -112,12 +117,29 @@ const PlacementAdPortalGroup = React.memo(function PlacementAdPortalGroup({
           ? 'w-full my-2'
           : 'w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 my-4';
       anchor.setAttribute('data-ad-has-visible', 'true');
+    } else if (hasAnyPending) {
+      host.className = 'w-full';
+      anchor.setAttribute('data-ad-has-visible', 'pending');
     } else {
       host.className = 'w-full h-0 overflow-hidden m-0 p-0';
       anchor.setAttribute('data-ad-has-visible', 'false');
     }
     anchor.setAttribute('data-ad-zone-status', aggregateStatus);
-  }, [aggregateStatus, anchor, hasAnyVisible, host, placement.position]);
+
+    const rafId = window.requestAnimationFrame(() => {
+      const info = describeAnchorElement(anchor);
+      for (const ad of ads) {
+        updateZoneMountDiagnostic({
+          zoneKey: extractAdsterraZoneKey(ad) || ad.id,
+          placementMounted: 'yes',
+          mountReason: `Mounted inside ${placement.slotId}`,
+          anchorFound: info.found,
+          anchorSummary: info.summary,
+        });
+      }
+    });
+    return () => window.cancelAnimationFrame(rafId);
+  }, [ads, aggregateStatus, anchor, hasAnyPending, hasAnyVisible, host, placement.position, placement.slotId]);
 
   useEffect(() => {
     return () => {
@@ -337,7 +359,7 @@ export function VisualAdInjector() {
 
         const host = document.createElement('div');
         host.setAttribute('data-imagelab-ad-container', placement.id);
-        host.className = 'w-full h-0 overflow-hidden m-0 p-0';
+        host.className = 'w-full';
 
         const insertTarget =
           placement.position === 'before'

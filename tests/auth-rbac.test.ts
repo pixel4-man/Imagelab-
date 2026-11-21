@@ -1036,9 +1036,9 @@ test('22. Adsterra official code parsing, friendly about:blank isolation bridge,
   assert.match(srcDoc, /postStatus\(\s*'no_inventory'/);
   assert.match(srcDoc, /postStatus\(\s*'popunder_ready'/);
 
-  // Extended non-premature probe window (8s initial + 12s pending grace) and structured per-zone diagnostics
-  assert.match(srcDoc, /run\(true\);\s*\},\s*8000\)/);
-  assert.match(srcDoc, /12000\s*-\s*elapsed/);
+  // Extended non-premature probe window (14s initial + 18s pending grace) and structured per-zone diagnostics
+  assert.match(srcDoc, /run\(true\);\s*\},\s*14000\)/);
+  assert.match(srcDoc, /18000\s*-\s*elapsed/);
   assert.match(srcDoc, /imagelab-ad-diagnostic/);
   for (const diagEvent of [
     'script_request_started',
@@ -1494,6 +1494,145 @@ test('26. Homepage ?addebug=1 production diagnostic panel is strictly read-only,
   const homeSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/HomePage.tsx'), 'utf-8');
   assert.match(homeSource, /<AdDebugPanel \/>/);
 });
+
+test('27. Nested about:blank lifecycle telemetry, non-zero pending containers, 5 failure classifications, and accurate cleanup reporting hold', async () => {
+  const {
+    recordAdDiagnosticMilestone,
+    getAdDiagnosticSnapshots,
+  } = await import('../src/lib/adDiagnostics.ts');
+
+  const frameSource = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/adFrameHtml.ts'), 'utf-8');
+  const adSlotSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdSlot.tsx'), 'utf-8');
+  const injectorSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/VisualAdInjector.tsx'), 'utf-8');
+  const homeSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/HomePage.tsx'), 'utf-8');
+  const panelSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdDebugPanel.tsx'), 'utf-8');
+
+  // 1. Strict opaque sandbox remains unchanged (no allow-same-origin anywhere in AdSlot)
+  assert.doesNotMatch(adSlotSource, /allow-same-origin/);
+  assert.match(adSlotSource, /sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"/);
+
+  // 2. Shadow HTMLDocument bridge & nested about:blank inspection capabilities exist without breaking sandbox isolation
+  assert.match(frameSource, /document\.implementation\.createHTMLDocument/);
+  assert.match(frameSource, /collectNestedFrameDetails/);
+  assert.match(frameSource, /determineFailureClassification/);
+  assert.match(frameSource, /hiddenCreatives/);
+  assert.match(frameSource, /IntersectionObserver/);
+  assert.match(frameSource, /updateIntersection/);
+  assert.match(frameSource, /peakBodyChildCount/);
+  assert.match(frameSource, /contentInsertedThenRemoved/);
+  assert.match(frameSource, /frame_telemetry/);
+
+  // 3. All 5 failure classifications exist
+  for (const classification of [
+    'empty_iframe_document',
+    'creative_inserted_but_hidden',
+    'creative_blocked_by_sandbox',
+    'provider_no_fill',
+    'detection_monitoring_bug',
+  ]) {
+    assert.ok(
+      frameSource.includes(`'${classification}'`),
+      `Missing failure classification in adFrameHtml: ${classification}`
+    );
+  }
+
+  // 4. Pending ad containers remain visible/non-zero height during detection and only collapse on terminal failure
+  assert.match(adSlotSource, /isFailed\s*\?\s*'h-0 overflow-hidden opacity-0 pointer-events-none m-0 p-0 border-0'\s*:\s*'w-full overflow-visible'/);
+  assert.match(adSlotSource, /aria-hidden=\{isFailed\}/);
+  assert.match(injectorSource, /hasAnyPending/);
+  assert.match(injectorSource, /host\.className\s*=\s*'w-full'/);
+  assert.match(injectorSource, /data-ad-has-visible/);
+  assert.match(homeSource, /\[&\[data-ad-has-visible='pending'\]\]:w-\[196px\]/);
+
+  // 5. Synchronous lastFrameStatusRef & TERMINAL_PRESERVED_STATUSES prevent false route/viewport unmount reporting
+  assert.match(adSlotSource, /lastFrameStatusRef\.current\s*=\s*data\.status/);
+  assert.match(adSlotSource, /Collapsed and unmounted ad frame after terminal status/);
+
+  // 6. Debug panel surfaces nested iframe lifecycle, IntersectionObserver, and failure classification
+  assert.match(panelSource, /Nested Frame #/);
+  assert.match(panelSource, /IntersectionObserver:/);
+  assert.match(panelSource, /Diagnostic classification:/);
+
+  // 7. Diagnostic state preserves terminal currentStatus when cleanup_unmounted fires under ?addebug=1
+  const origWin = globalThis.window;
+  try {
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { location: { pathname: '/', search: '?addebug=1' } },
+    });
+    const zoneKey = '1c30969d7c004ca503ae6460010eb760';
+    recordAdDiagnosticMilestone({
+      zoneKey,
+      event: 'zone_mounted',
+      status: 'loading',
+      detail: 'Test mount',
+    });
+    recordAdDiagnosticMilestone({
+      zoneKey,
+      event: 'empty_response',
+      status: 'no_inventory',
+      failureClassification: 'empty_iframe_document',
+      detail: 'Nested about:blank iframe stayed empty',
+      nestedIframeDetails: [
+        {
+          index: 1,
+          src: 'about:blank',
+          documentAccess: 'bridge_virtual',
+          readyState: 'complete',
+          receivedHtml: false,
+          hasBodyContent: false,
+          wroteHtmlBytes: 0,
+          writeCallCount: 0,
+          flushCount: 0,
+          srcdocBytes: 0,
+          bodyChildCount: 0,
+          peakBodyChildCount: 0,
+          scriptCount: 0,
+          imgCount: 0,
+          childIframeCount: 0,
+          contentInsertedThenRemoved: false,
+          widthAttr: '320',
+          heightAttr: '50',
+          display: 'block',
+          visibility: 'visible',
+          opacity: '1',
+          boundingRect: '0,0 320x50 (320x50)',
+          hiddenCreativeDetected: false,
+          hiddenCreativeReason: '',
+          removedFromDom: false,
+          lifecycleSummary: 'Empty document (0 writes, 0 DOM appends, bodyChildren=0)',
+        },
+      ],
+      intersectionObserver: {
+        supported: true,
+        observed: true,
+        isIntersecting: true,
+        intersectionRatio: 1,
+        boundingRect: '320x50',
+        intersectionRect: '320x50',
+      },
+    });
+    recordAdDiagnosticMilestone({
+      zoneKey,
+      event: 'cleanup_unmounted',
+      status: 'no_inventory',
+      detail: 'Collapsed and unmounted ad frame after terminal status (no_inventory).',
+    });
+
+    const snap = getAdDiagnosticSnapshots().find((s) => s.zoneKey === zoneKey);
+    assert.ok(snap);
+    assert.equal(snap.currentStatus, 'no_inventory');
+    assert.equal(snap.failureClassification, 'empty_iframe_document');
+    assert.equal(snap.removedByCleanup, true);
+    assert.match(snap.cleanupReason, /terminal status \(no_inventory\)/);
+    assert.equal(snap.nestedIframeDetails.length, 1);
+    assert.equal(snap.nestedIframeDetails[0].bodyChildCount, 0);
+    assert.equal(snap.intersectionObserver?.isIntersecting, true);
+  } finally {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: origWin });
+  }
+});
+
 
 
 

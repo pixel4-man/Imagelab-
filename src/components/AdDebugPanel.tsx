@@ -117,8 +117,11 @@ export function AdDebugPanel() {
         scriptEvent: z.scriptEvent,
         nestedIframeCreated: z.nestedIframeCreated,
         nestedIframeSrc: z.nestedIframeSrc || null,
+        nestedIframeDetails: z.nestedIframeDetails,
+        intersectionObserver: z.intersectionObserver,
         visibleCreativeDetected: z.visibleCreativeDetected,
         visibleCreativeDetail: z.visibleCreativeDetail || null,
+        failureClassification: z.failureClassification || null,
         observedHttpStatus: z.observedHttpStatus || null,
         removedByCleanup: z.removedByCleanup,
         cleanupReason: z.cleanupReason || null,
@@ -237,6 +240,36 @@ export function AdDebugPanel() {
                       : 'No'}
                   </dd>
                 </div>
+                {zone.intersectionObserver && (
+                  <div>
+                    <dt className="inline text-[#FAF7F2]/60">IntersectionObserver: </dt>
+                    <dd className="inline text-[#FAF7F2]">
+                      {zone.intersectionObserver.observed
+                        ? `isIntersecting=${String(zone.intersectionObserver.isIntersecting)}, ratio=${zone.intersectionObserver.intersectionRatio ?? 'n/a'}, rect=${zone.intersectionObserver.boundingRect}`
+                        : `supported=${String(zone.intersectionObserver.supported)}, pending`}
+                    </dd>
+                  </div>
+                )}
+                {zone.nestedIframeDetails.map((nf) => (
+                  <div
+                    key={nf.index}
+                    className="mt-1 p-1.5 rounded bg-[#112027]/80 border border-[#FAF7F2]/10 text-[10px] space-y-0.5"
+                  >
+                    <div className="text-[#2A9D8F] font-semibold">
+                      Nested Frame #{nf.index} ({nf.src || 'about:blank'}) · access={nf.documentAccess}
+                    </div>
+                    <div className="text-[#FAF7F2]/85">
+                      readyState={nf.readyState} · htmlReceived={nf.receivedHtml ? 'Yes' : 'No'} (writes={nf.writeCallCount}, bytes={nf.wroteHtmlBytes}, flushes={nf.flushCount}) · bodyChildren={nf.bodyChildCount} (peak={nf.peakBodyChildCount})
+                    </div>
+                    <div className="text-[#FAF7F2]/85">
+                      tags: scripts={nf.scriptCount}, imgs={nf.imgCount}, childFrames={nf.childIframeCount} · insertedThenRemoved={nf.contentInsertedThenRemoved ? 'Yes' : 'No'}
+                    </div>
+                    <div className="text-[#FAF7F2]/85">
+                      box: display={nf.display}, visibility={nf.visibility}, opacity={nf.opacity}, rect={nf.boundingRect}, attrs={nf.widthAttr || 'auto'}×{nf.heightAttr || 'auto'}
+                    </div>
+                    <div className="text-[#FAF7F2]/80">{nf.lifecycleSummary}</div>
+                  </div>
+                ))}
                 <div>
                   <dt className="inline text-[#FAF7F2]/60">Visible creative detected: </dt>
                   <dd className="inline text-[#FAF7F2]">
@@ -247,6 +280,12 @@ export function AdDebugPanel() {
                         : 'No'}
                   </dd>
                 </div>
+                {zone.failureClassification && (
+                  <div>
+                    <dt className="inline text-[#FAF7F2]/60">Diagnostic classification: </dt>
+                    <dd className="inline text-[#F4A261]">{zone.failureClassification}</dd>
+                  </div>
+                )}
                 <div>
                   <dt className="inline text-[#FAF7F2]/60">Available HTTP status: </dt>
                   <dd className="inline text-[#FAF7F2]">

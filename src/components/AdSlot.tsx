@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AdFailureClassification,
+  IntersectionObserverDiagnosticDetail,
+  NestedIframeDiagnosticDetail,
   isAdDebugQueryEnabled,
   isAdDiagnosticRecordingEnabled,
   recordAdDiagnosticMilestone,
@@ -62,6 +65,9 @@ export interface AdZoneDiagnosticEvent {
   event: string;
   status: string;
   outcomeCategory?: string;
+  failureClassification?: AdFailureClassification;
+  nestedIframeDetails?: NestedIframeDiagnosticDetail[];
+  intersectionObserver?: IntersectionObserverDiagnosticDetail | null;
   responseStatus?: string;
   detail: string;
   url?: string;
@@ -77,6 +83,7 @@ export interface AdZoneDiagnosticState {
   dimensions: string;
   currentStatus: string;
   outcomeCategory?: string;
+  failureClassification?: AdFailureClassification;
   responseStatus?: string;
   lastDetail: string;
   events: AdZoneDiagnosticEvent[];
@@ -104,6 +111,9 @@ function recordZoneDiagnostic(
     event: entry.event,
     status: entry.status,
     outcomeCategory: entry.outcomeCategory,
+    failureClassification: entry.failureClassification,
+    nestedIframeDetails: entry.nestedIframeDetails,
+    intersectionObserver: entry.intersectionObserver,
     responseStatus: entry.responseStatus,
     detail: entry.detail,
     url: entry.url,
@@ -117,9 +127,12 @@ function recordZoneDiagnostic(
       if (existing) {
         existing.currentStatus = entry.status || existing.currentStatus;
         existing.outcomeCategory = entry.outcomeCategory || existing.outcomeCategory;
+        existing.failureClassification = entry.failureClassification || existing.failureClassification;
         existing.responseStatus = entry.responseStatus || existing.responseStatus;
         existing.lastDetail = entry.detail || existing.lastDetail;
-        existing.events = [...existing.events.slice(-24), fullEntry];
+        if (entry.event !== 'frame_telemetry') {
+          existing.events = [...existing.events.slice(-24), fullEntry];
+        }
       } else {
         store[entry.zoneKey] = {
           zoneKey: entry.zoneKey,
@@ -129,13 +142,16 @@ function recordZoneDiagnostic(
           dimensions: entry.dimensions,
           currentStatus: entry.status || entry.event,
           outcomeCategory: entry.outcomeCategory,
+          failureClassification: entry.failureClassification,
           responseStatus: entry.responseStatus,
           lastDetail: entry.detail,
-          events: [fullEntry],
+          events: entry.event === 'frame_telemetry' ? [] : [fullEntry],
         };
       }
     }
   }
+
+  if (entry.event === 'frame_telemetry') return;
 
   const slotLabel = entry.slotId ? `@${entry.slotId}` : '';
   const outcomeLabel = entry.outcomeCategory ? ` [${entry.outcomeCategory}]` : '';
@@ -158,6 +174,7 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
   terminalStatus,
   onStatusChange,
   onOutcomeChange,
+  onClassificationChange,
   onResponseStatusChange,
 }: {
   ad: AdRecord;
@@ -166,6 +183,7 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
   terminalStatus?: AdRenderStatus | null;
   onStatusChange?: (status: AdRenderStatus, message?: string) => void;
   onOutcomeChange?: (outcome: string) => void;
+  onClassificationChange?: (classification: AdFailureClassification) => void;
   onResponseStatusChange?: (responseStatus: string) => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -174,10 +192,13 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
   onStatusRef.current = onStatusChange;
   const onOutcomeRef = useRef(onOutcomeChange);
   onOutcomeRef.current = onOutcomeChange;
+  const onClassificationRef = useRef(onClassificationChange);
+  onClassificationRef.current = onClassificationChange;
   const onResponseStatusRef = useRef(onResponseStatusChange);
   onResponseStatusRef.current = onResponseStatusChange;
   const terminalStatusRef = useRef<AdRenderStatus | null>(terminalStatus || null);
   terminalStatusRef.current = terminalStatus || null;
+  const lastFrameStatusRef = useRef<AdRenderStatus>('loading');
   const seenDiagRef = useRef<Set<string>>(new Set());
 
   const atMeta = useMemo(() => extractAtOptionsMetadata(ad.scriptCode), [ad.scriptCode]);
@@ -220,6 +241,7 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
       setAutoHeight(fixedHeightPx);
     }
     seenDiagRef.current.clear();
+    lastFrameStatusRef.current = 'loading';
     const scriptSrcMatch = (ad.scriptCode || '').match(/<script[^>]*\bsrc=["']([^"']+)["']/i);
     recordZoneDiagnostic(
       {
@@ -262,6 +284,9 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
         event?: string;
         status?: AdRenderStatus;
         outcomeCategory?: string;
+        failureClassification?: AdFailureClassification;
+        nestedIframeDetails?: NestedIframeDiagnosticDetail[];
+        intersectionObserver?: IntersectionObserverDiagnosticDetail | null;
         responseStatus?: string;
         height?: number;
         message?: string;
@@ -275,12 +300,19 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
         if (data.outcomeCategory) {
           onOutcomeRef.current?.(data.outcomeCategory);
         }
+        if (data.failureClassification) {
+          onClassificationRef.current?.(data.failureClassification);
+        }
         if (data.responseStatus) {
           onResponseStatusRef.current?.(data.responseStatus);
         }
+        const isRepeatable =
+          data.event === 'frame_telemetry' || data.event === 'nested_iframe_updated';
         const dedupeKey = `${data.event}|${data.status || ''}|${data.url || ''}|${data.detail || ''}`;
-        if (!seenDiagRef.current.has(dedupeKey)) {
-          seenDiagRef.current.add(dedupeKey);
+        if (isRepeatable || !seenDiagRef.current.has(dedupeKey)) {
+          if (!isRepeatable) {
+            seenDiagRef.current.add(dedupeKey);
+          }
           const isWarn =
             data.event === 'script_failed' ||
             data.event === 'empty_response' ||
@@ -296,6 +328,9 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
               event: data.event,
               status: data.status || '',
               outcomeCategory: data.outcomeCategory,
+              failureClassification: data.failureClassification,
+              nestedIframeDetails: data.nestedIframeDetails,
+              intersectionObserver: data.intersectionObserver,
               responseStatus: data.responseStatus,
               detail: data.detail || '',
               url: data.url || undefined,
@@ -318,6 +353,10 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
         setAutoHeight(Math.ceil(data.height));
       }
       if (data.status) {
+        lastFrameStatusRef.current = data.status;
+        if (TERMINAL_FAILED_STATUSES.has(data.status)) {
+          terminalStatusRef.current = data.status;
+        }
         onStatusRef.current?.(data.status, data.message);
       }
     };
@@ -336,9 +375,17 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
           // Ignore teardown errors
         }
       }
-      const reason = terminalStatusRef.current
-        ? `Unmounted after terminal failure/no-fill status (${terminalStatusRef.current})`
-        : 'Disposed sandboxed ad frame container on route/viewport unmount.';
+      const resolvedTerminal =
+        terminalStatusRef.current ||
+        (TERMINAL_FAILED_STATUSES.has(lastFrameStatusRef.current)
+          ? lastFrameStatusRef.current
+          : null);
+      const reason = resolvedTerminal
+        ? `Collapsed and unmounted ad frame after terminal status (${resolvedTerminal}).`
+        : lastFrameStatusRef.current === 'loaded' ||
+            lastFrameStatusRef.current === 'preview_unsupported'
+          ? `Disposed active ad frame (${lastFrameStatusRef.current}) on route, viewport, or parent unmount.`
+          : `Disposed pending ad frame (last status: ${lastFrameStatusRef.current}) on route, viewport, or parent unmount.`;
       recordZoneDiagnostic(
         {
           zoneKey,
@@ -347,7 +394,7 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
           slotId,
           dimensions: dimensionsLabel,
           event: 'cleanup_unmounted',
-          status: terminalStatusRef.current || 'unmounted',
+          status: resolvedTerminal || 'unmounted',
           detail: reason,
         },
         'info'
@@ -415,7 +462,7 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
   );
 });
 
-const TERMINAL_FAILED_STATUSES = new Set<AdRenderStatus>([
+export const TERMINAL_FAILED_STATUSES = new Set<AdRenderStatus>([
   'no_inventory',
   'rendering_blocked',
   'script_blocked',
@@ -426,8 +473,9 @@ const TERMINAL_FAILED_STATUSES = new Set<AdRenderStatus>([
 /**
  * Renders an automatic Adsterra zone inside an isolated sandboxed container
  * with its configured dimensions and natural aspect ratio.
- * Collapses cleanly when no inventory is returned or rendering is blocked, and
- * unmounts the sandboxed frame on terminal failure to avoid idle memory usage.
+ * Keeps real non-zero layout bounds during active creative detection so
+ * IntersectionObserver viewability checks succeed, then collapses cleanly if
+ * no inventory is returned or rendering is blocked.
  */
 export const LivePublicAdItem = React.memo(function LivePublicAdItem({
   ad,
@@ -445,6 +493,7 @@ export const LivePublicAdItem = React.memo(function LivePublicAdItem({
   const [status, setStatus] = useState<AdRenderStatus>('loading');
   const [statusDetail, setStatusDetail] = useState<string>('');
   const [outcomeCategory, setOutcomeCategory] = useState<string>('');
+  const [failureClassification, setFailureClassification] = useState<AdFailureClassification>('');
   const [responseStatus, setResponseStatus] = useState<string>('');
   const zoneKey = useMemo(() => extractAdsterraZoneKey(ad) || '', [ad]);
 
@@ -467,6 +516,7 @@ export const LivePublicAdItem = React.memo(function LivePublicAdItem({
     setStatus('loading');
     setStatusDetail('');
     setOutcomeCategory('');
+    setFailureClassification('');
     setResponseStatus('');
     onRenderStateChange?.(ad.id, 'loading');
     onVisibilityChange?.(ad.id, false);
@@ -484,14 +534,17 @@ export const LivePublicAdItem = React.memo(function LivePublicAdItem({
       data-ad-dimensions={`${ad.width}x${ad.height}`}
       data-ad-render-status={status}
       data-ad-outcome={outcomeCategory || undefined}
+      data-ad-classification={failureClassification || undefined}
       data-ad-response-status={responseStatus || undefined}
       data-ad-status-detail={statusDetail || undefined}
       className={
         isVisible
           ? 'rounded-2xl bg-[#FAF7F2]/92 border border-[#264653]/12 p-1.5 sm:p-3 overflow-hidden transition-opacity duration-200'
-          : 'h-0 overflow-hidden opacity-0 pointer-events-none m-0 p-0 border-0'
+          : isFailed
+            ? 'h-0 overflow-hidden opacity-0 pointer-events-none m-0 p-0 border-0'
+            : 'w-full overflow-visible'
       }
-      aria-hidden={!isVisible}
+      aria-hidden={isFailed}
     >
       {isVisible && (
         <div className="flex items-center justify-between gap-2 mb-1.5 px-1">
@@ -509,6 +562,7 @@ export const LivePublicAdItem = React.memo(function LivePublicAdItem({
           terminalStatus={isFailed ? status : null}
           onStatusChange={handleStatus}
           onOutcomeChange={setOutcomeCategory}
+          onClassificationChange={setFailureClassification}
           onResponseStatusChange={setResponseStatus}
         />
       )}

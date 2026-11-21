@@ -3,6 +3,53 @@ import { ADSTERRA_ZONES, AutomaticAdsterraZoneDefinition } from './adsterraZones
 export type PlacementMountStatus = 'yes' | 'skipped_viewport' | 'no';
 export type ScriptEventStatus = 'not_started' | 'pending' | 'load_fired' | 'error_fired';
 
+export type AdFailureClassification =
+  | ''
+  | 'creative_rendered'
+  | 'empty_iframe_document'
+  | 'creative_inserted_but_hidden'
+  | 'creative_blocked_by_sandbox'
+  | 'provider_no_fill'
+  | 'detection_monitoring_bug';
+
+export interface NestedIframeDiagnosticDetail {
+  index: number;
+  src: string;
+  documentAccess: 'bridge_virtual' | 'same_origin_native' | 'cross_origin_blocked';
+  readyState: string;
+  receivedHtml: boolean;
+  hasBodyContent: boolean;
+  wroteHtmlBytes: number;
+  writeCallCount: number;
+  flushCount: number;
+  srcdocBytes: number;
+  bodyChildCount: number;
+  peakBodyChildCount: number;
+  scriptCount: number;
+  imgCount: number;
+  childIframeCount: number;
+  contentInsertedThenRemoved: boolean;
+  widthAttr: string;
+  heightAttr: string;
+  display: string;
+  visibility: string;
+  opacity: string;
+  boundingRect: string;
+  hiddenCreativeDetected: boolean;
+  hiddenCreativeReason: string;
+  removedFromDom: boolean;
+  lifecycleSummary: string;
+}
+
+export interface IntersectionObserverDiagnosticDetail {
+  supported: boolean;
+  observed: boolean;
+  isIntersecting: boolean | null;
+  intersectionRatio: number | null;
+  boundingRect: string;
+  intersectionRect: string;
+}
+
 export interface AdZoneDiagnosticLogEntry {
   event: string;
   status: string;
@@ -29,8 +76,11 @@ export interface AdZoneDiagnosticSnapshot {
   scriptEvent: ScriptEventStatus;
   nestedIframeCreated: boolean;
   nestedIframeSrc: string;
+  nestedIframeDetails: NestedIframeDiagnosticDetail[];
+  intersectionObserver: IntersectionObserverDiagnosticDetail | null;
   visibleCreativeDetected: boolean;
   visibleCreativeDetail: string;
+  failureClassification: AdFailureClassification;
   observedHttpStatus: string;
   removedByCleanup: boolean;
   cleanupReason: string;
@@ -86,8 +136,11 @@ function createInitialSnapshot(zone: AutomaticAdsterraZoneDefinition): AdZoneDia
     scriptEvent: 'not_started',
     nestedIframeCreated: false,
     nestedIframeSrc: '',
+    nestedIframeDetails: [],
+    intersectionObserver: null,
     visibleCreativeDetected: false,
     visibleCreativeDetail: '',
+    failureClassification: '',
     observedHttpStatus: '',
     removedByCleanup: false,
     cleanupReason: '',
@@ -161,11 +214,25 @@ export function updateZoneMountDiagnostic(params: {
   notifyListeners();
 }
 
+const TERMINAL_PRESERVED_STATUSES = new Set([
+  'loaded',
+  'preview_unsupported',
+  'popunder_ready',
+  'no_inventory',
+  'rendering_blocked',
+  'script_blocked',
+  'timeout',
+  'error',
+]);
+
 export function recordAdDiagnosticMilestone(params: {
   zoneKey: string;
   event: string;
   status?: string;
   outcomeCategory?: string;
+  failureClassification?: AdFailureClassification;
+  nestedIframeDetails?: NestedIframeDiagnosticDetail[];
+  intersectionObserver?: IntersectionObserverDiagnosticDetail | null;
   responseStatus?: string;
   detail: string;
   url?: string;
@@ -176,20 +243,37 @@ export function recordAdDiagnosticMilestone(params: {
   if (!existing) return;
 
   const timestamp = new Date().toISOString();
+  const isTelemetryOnly = params.event === 'frame_telemetry';
+  const nextStatus =
+    params.event === 'cleanup_unmounted' && TERMINAL_PRESERVED_STATUSES.has(existing.currentStatus)
+      ? existing.currentStatus
+      : params.status || existing.currentStatus;
+
   const next: AdZoneDiagnosticSnapshot = {
     ...existing,
-    currentStatus: params.status || existing.currentStatus,
+    currentStatus: nextStatus,
     outcomeCategory: params.outcomeCategory || existing.outcomeCategory,
-    events: [
-      ...existing.events.slice(-19),
-      {
-        event: params.event,
-        status: params.status || '',
-        detail: params.detail,
-        elapsedMs: params.elapsedMs,
-        timestamp,
-      },
-    ],
+    failureClassification: params.failureClassification || existing.failureClassification,
+    nestedIframeDetails:
+      Array.isArray(params.nestedIframeDetails) && params.nestedIframeDetails.length > 0
+        ? params.nestedIframeDetails
+        : existing.nestedIframeDetails,
+    intersectionObserver:
+      params.intersectionObserver !== undefined
+        ? params.intersectionObserver
+        : existing.intersectionObserver,
+    events: isTelemetryOnly
+      ? existing.events
+      : [
+          ...existing.events.slice(-23),
+          {
+            event: params.event,
+            status: params.status || '',
+            detail: params.detail,
+            elapsedMs: params.elapsedMs,
+            timestamp,
+          },
+        ],
   };
 
   if (params.responseStatus) {
@@ -201,6 +285,10 @@ export function recordAdDiagnosticMilestone(params: {
       next.placementMounted = 'yes';
       next.removedByCleanup = false;
       next.cleanupReason = '';
+      next.failureClassification = '';
+      next.nestedIframeDetails = [];
+      next.intersectionObserver = null;
+      next.timedOut = false;
       break;
     case 'script_element_created':
       next.scriptElementCreated = true;
@@ -225,6 +313,7 @@ export function recordAdDiagnosticMilestone(params: {
       }
       break;
     case 'nested_iframe_created':
+    case 'nested_iframe_updated':
       next.nestedIframeCreated = true;
       if (params.url) {
         next.nestedIframeSrc = params.url;
@@ -234,6 +323,7 @@ export function recordAdDiagnosticMilestone(params: {
       if (params.status === 'loaded') {
         next.visibleCreativeDetected = true;
         next.visibleCreativeDetail = params.detail;
+        next.failureClassification = 'creative_rendered';
       } else if (params.status === 'preview_unsupported') {
         next.visibleCreativeDetected = false;
         next.visibleCreativeDetail =
@@ -242,7 +332,7 @@ export function recordAdDiagnosticMilestone(params: {
       break;
     case 'empty_response':
       next.visibleCreativeDetected = false;
-      if (!next.errorMessage) {
+      if (!next.errorMessage || params.detail) {
         next.errorMessage = params.detail;
       }
       break;

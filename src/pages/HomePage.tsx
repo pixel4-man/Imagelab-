@@ -134,7 +134,7 @@ export function HomePage() {
             <aside
               data-ad-slot="desktop_sidebar_banner"
               data-ad-label="Desktop Sidebar Banner (160×600)"
-              className="hidden lg:block shrink-0 w-0 overflow-hidden [&[data-ad-has-visible='true']]:w-[196px] [&[data-ad-has-visible='true']]:overflow-visible lg:sticky lg:top-24"
+              className="hidden lg:block shrink-0 w-0 overflow-hidden [&[data-ad-has-visible='true']]:w-[196px] [&[data-ad-has-visible='true']]:overflow-visible [&[data-ad-has-visible='pending']]:w-[196px] [&[data-ad-has-visible='pending']]:overflow-visible lg:sticky lg:top-24"
             />
           </div>
         </section>
