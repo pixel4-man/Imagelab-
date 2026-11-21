@@ -1,4 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  isAdDebugQueryEnabled,
+  isAdDiagnosticRecordingEnabled,
+  recordAdDiagnosticMilestone,
+} from '../lib/adDiagnostics';
 import { getPredefinedActiveAdState } from '../lib/adsPersistence';
 import { AdFrameRenderStatus, buildSandboxedAdSrcDoc } from '../lib/adFrameHtml';
 import { extractAdsterraZoneKey } from '../lib/adsterraZones';
@@ -94,7 +99,18 @@ function recordZoneDiagnostic(
 ) {
   const timestamp = new Date().toISOString();
   const fullEntry: AdZoneDiagnosticEvent = { ...entry, timestamp };
-  if (IS_DEV) {
+  recordAdDiagnosticMilestone({
+    zoneKey: entry.zoneKey,
+    event: entry.event,
+    status: entry.status,
+    outcomeCategory: entry.outcomeCategory,
+    responseStatus: entry.responseStatus,
+    detail: entry.detail,
+    url: entry.url,
+    elapsedMs: entry.elapsedMs,
+  });
+
+  if (IS_DEV || isAdDebugQueryEnabled()) {
     const store = getDiagnosticsStore();
     if (store) {
       const existing = store[entry.zoneKey];
@@ -130,7 +146,7 @@ function recordZoneDiagnostic(
   }`;
   if (level === 'warn') {
     console.warn(msg);
-  } else if (IS_DEV) {
+  } else if (isAdDiagnosticRecordingEnabled()) {
     console.info(msg);
   }
 }
@@ -139,6 +155,7 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
   ad,
   placementId,
   slotId,
+  terminalStatus,
   onStatusChange,
   onOutcomeChange,
   onResponseStatusChange,
@@ -146,6 +163,7 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
   ad: AdRecord;
   placementId?: string;
   slotId?: string;
+  terminalStatus?: AdRenderStatus | null;
   onStatusChange?: (status: AdRenderStatus, message?: string) => void;
   onOutcomeChange?: (outcome: string) => void;
   onResponseStatusChange?: (responseStatus: string) => void;
@@ -158,6 +176,8 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
   onOutcomeRef.current = onOutcomeChange;
   const onResponseStatusRef = useRef(onResponseStatusChange);
   onResponseStatusRef.current = onResponseStatusChange;
+  const terminalStatusRef = useRef<AdRenderStatus | null>(terminalStatus || null);
+  terminalStatusRef.current = terminalStatus || null;
   const seenDiagRef = useRef<Set<string>>(new Set());
 
   const atMeta = useMemo(() => extractAtOptionsMetadata(ad.scriptCode), [ad.scriptCode]);
@@ -316,6 +336,9 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
           // Ignore teardown errors
         }
       }
+      const reason = terminalStatusRef.current
+        ? `Unmounted after terminal failure/no-fill status (${terminalStatusRef.current})`
+        : 'Disposed sandboxed ad frame container on route/viewport unmount.';
       recordZoneDiagnostic(
         {
           zoneKey,
@@ -324,8 +347,8 @@ export const SandboxedAdFrame = React.memo(function SandboxedAdFrame({
           slotId,
           dimensions: dimensionsLabel,
           event: 'cleanup_unmounted',
-          status: 'unmounted',
-          detail: 'Disposed sandboxed ad frame container.',
+          status: terminalStatusRef.current || 'unmounted',
+          detail: reason,
         },
         'info'
       );
@@ -483,6 +506,7 @@ export const LivePublicAdItem = React.memo(function LivePublicAdItem({
           ad={ad}
           placementId={placementId || ad.placementId}
           slotId={slotId}
+          terminalStatus={isFailed ? status : null}
           onStatusChange={handleStatus}
           onOutcomeChange={setOutcomeCategory}
           onResponseStatusChange={setResponseStatus}

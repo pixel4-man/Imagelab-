@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation } from 'react-router-dom';
+import {
+  isAdDiagnosticRecordingEnabled,
+  updateZoneMountDiagnostic,
+} from '../lib/adDiagnostics';
 import { getPredefinedActiveAdState } from '../lib/adsPersistence';
 import {
   extractAdsterraZoneKey,
@@ -14,6 +18,25 @@ import {
 } from './AdSlot';
 
 const IS_DEV_INJECTOR = Boolean(import.meta.env?.DEV);
+
+function describeAnchorElement(anchor: HTMLElement | null): {
+  found: boolean;
+  summary: string;
+} {
+  if (!anchor) {
+    return { found: false, summary: 'Anchor element not in DOM' };
+  }
+  try {
+    const cs = window.getComputedStyle(anchor);
+    const rect = anchor.getBoundingClientRect();
+    return {
+      found: true,
+      summary: `display=${cs.display}, overflow=${cs.overflow}, rect=${Math.round(rect.width)}×${Math.round(rect.height)}px`,
+    };
+  } catch {
+    return { found: true, summary: 'Anchor present' };
+  }
+}
 
 interface MountedSlotPortal {
   placement: VisualPlacementRecord;
@@ -173,26 +196,66 @@ export function VisualAdInjector() {
       return;
     }
 
-    const matchingPlacements = adState.placements.filter(
-      (p) => p.status === 'active' && matchesPlacementRoute(p.pageRoute, location.pathname)
-    );
-
     const desiredByPlacementId = new Map<
       string,
       { placement: VisualPlacementRecord; ads: AdRecord[] }
     >();
     const seenZoneKeys = new Set<string>();
 
-    for (const placement of matchingPlacements) {
+    for (const placement of adState.placements) {
       const rawAds = adState.ads
         .filter((a) => a.status === 'active' && a.placementId === placement.id)
         .sort((a, b) => a.priority - b.priority);
-
       if (rawAds.length === 0) continue;
 
+      const routeMatched =
+        placement.status === 'active' &&
+        matchesPlacementRoute(placement.pageRoute, location.pathname);
       const deviceTarget = getPlacementDeviceTarget(placement, rawAds);
-      if (deviceTarget === 'desktop' && !isDesktopViewport) continue;
-      if (deviceTarget === 'mobile' && isDesktopViewport) continue;
+      const anchor = findAnchorElement(placement);
+      const anchorInfo = describeAnchorElement(anchor);
+
+      if (!routeMatched) {
+        for (const ad of rawAds) {
+          const zKey = extractAdsterraZoneKey(ad) || ad.id;
+          updateZoneMountDiagnostic({
+            zoneKey: zKey,
+            placementMounted: 'no',
+            mountReason: `Route mismatch (${location.pathname} vs ${placement.pageRoute})`,
+            anchorFound: anchorInfo.found,
+            anchorSummary: anchorInfo.summary,
+          });
+        }
+        continue;
+      }
+
+      if (deviceTarget === 'desktop' && !isDesktopViewport) {
+        for (const ad of rawAds) {
+          const zKey = extractAdsterraZoneKey(ad) || ad.id;
+          updateZoneMountDiagnostic({
+            zoneKey: zKey,
+            placementMounted: 'skipped_viewport',
+            mountReason: 'Desktop-only placement (>=1024px) skipped on mobile viewport',
+            anchorFound: anchorInfo.found,
+            anchorSummary: anchorInfo.summary,
+          });
+        }
+        continue;
+      }
+
+      if (deviceTarget === 'mobile' && isDesktopViewport) {
+        for (const ad of rawAds) {
+          const zKey = extractAdsterraZoneKey(ad) || ad.id;
+          updateZoneMountDiagnostic({
+            zoneKey: zKey,
+            placementMounted: 'skipped_viewport',
+            mountReason: 'Mobile-only placement (<1024px) skipped on desktop viewport',
+            anchorFound: anchorInfo.found,
+            anchorSummary: anchorInfo.summary,
+          });
+        }
+        continue;
+      }
 
       const dedupedAds: AdRecord[] = [];
       for (const ad of rawAds) {
@@ -221,6 +284,16 @@ export function VisualAdInjector() {
           } catch {
             // Ignore
           }
+          for (const ad of existing.ads) {
+            const zKey = extractAdsterraZoneKey(ad) || ad.id;
+            updateZoneMountDiagnostic({
+              zoneKey: zKey,
+              placementMounted: 'no',
+              mountReason: 'Unmounted due to route/viewport change or missing anchor',
+              removedByCleanup: true,
+              cleanupReason: 'Portal host removed by VisualAdInjector',
+            });
+          }
           changed = true;
         } else {
           // Preserve exact existing host & iframe across route navigations / rerenders
@@ -234,9 +307,33 @@ export function VisualAdInjector() {
 
       // Mount newly available placements that aren't already mounted
       for (const [placementId, { placement, ads }] of desiredByPlacementId.entries()) {
-        if (nextMap.has(placementId)) continue;
+        if (nextMap.has(placementId)) {
+          const anchorInfo = describeAnchorElement(findAnchorElement(placement));
+          for (const ad of ads) {
+            updateZoneMountDiagnostic({
+              zoneKey: extractAdsterraZoneKey(ad) || ad.id,
+              placementMounted: 'yes',
+              mountReason: `Mounted inside ${placement.slotId}`,
+              anchorFound: anchorInfo.found,
+              anchorSummary: anchorInfo.summary,
+            });
+          }
+          continue;
+        }
         const anchor = findAnchorElement(placement);
-        if (!anchor) continue;
+        const anchorInfo = describeAnchorElement(anchor);
+        if (!anchor) {
+          for (const ad of ads) {
+            updateZoneMountDiagnostic({
+              zoneKey: extractAdsterraZoneKey(ad) || ad.id,
+              placementMounted: 'no',
+              mountReason: `Anchor [data-ad-slot="${placement.slotId}"] not found in DOM`,
+              anchorFound: false,
+              anchorSummary: anchorInfo.summary,
+            });
+          }
+          continue;
+        }
 
         const host = document.createElement('div');
         host.setAttribute('data-imagelab-ad-container', placement.id);
@@ -256,6 +353,15 @@ export function VisualAdInjector() {
           anchor,
           host,
         });
+        for (const ad of ads) {
+          updateZoneMountDiagnostic({
+            zoneKey: extractAdsterraZoneKey(ad) || ad.id,
+            placementMounted: 'yes',
+            mountReason: `Mounted inside ${placement.slotId}`,
+            anchorFound: anchorInfo.found,
+            anchorSummary: anchorInfo.summary,
+          });
+        }
         changed = true;
       }
 
@@ -270,7 +376,7 @@ export function VisualAdInjector() {
         )
         .join(', ');
       const routeSig = `${location.pathname}|${isDesktopViewport ? 'desktop' : 'mobile'}|${activeZonesSummary}`;
-      if (IS_DEV_INJECTOR && lastRouteLogRef.current !== routeSig && activeZonesSummary) {
+      if ((IS_DEV_INJECTOR || isAdDiagnosticRecordingEnabled()) && lastRouteLogRef.current !== routeSig && activeZonesSummary) {
         lastRouteLogRef.current = routeSig;
         console.info(
           `[ImageLab Ads] Active zones for ${location.pathname} (${isDesktopViewport ? 'desktop' : 'mobile'}): ${activeZonesSummary}`

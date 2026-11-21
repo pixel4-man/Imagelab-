@@ -1407,5 +1407,94 @@ test('25. Cross-browser clipboard fallback, sync-activation unlock prefetch, man
   assert.match(injectorSource, /slotId=\{placement\.slotId\}/);
 });
 
+test('26. Homepage ?addebug=1 production diagnostic panel is strictly read-only, non-guessing, and isolates all 5 zones', async () => {
+  const {
+    isAdDebugQueryEnabled,
+    getAdDiagnosticSnapshots,
+  } = await import('../src/lib/adDiagnostics.ts');
+
+  // 1. Strictly activated ONLY on homepage '/' when '?addebug=1' is present
+  assert.equal(isAdDebugQueryEnabled('/', '?addebug=1'), true);
+  assert.equal(isAdDebugQueryEnabled('/', '?foo=bar&addebug=1'), true);
+  assert.equal(isAdDebugQueryEnabled('/', ''), false);
+  assert.equal(isAdDebugQueryEnabled('/', '?addebug=0'), false);
+  assert.equal(isAdDebugQueryEnabled('/explore', '?addebug=1'), false);
+  assert.equal(isAdDebugQueryEnabled('/admin', '?addebug=1'), false);
+  assert.equal(isAdDebugQueryEnabled('/login', '?addebug=1'), false);
+
+  // 2. All 5 official zones appear separately with clean initial diagnostic fields
+  const snaps = getAdDiagnosticSnapshots();
+  assert.equal(snaps.length, 5);
+  assert.deepEqual(
+    snaps.map((s) => s.zoneKey),
+    [
+      '9bf275cec2fca23dd811c4ea8b659006',
+      '8f006a55a574a4657b9c0b877e503a54',
+      '1c30969d7c004ca503ae6460010eb760',
+      '4606ed44271ecec8b5f053ee87806f78',
+      '873ad292a31a1a1dee93fce99c7c7ff0',
+    ]
+  );
+
+  // 3. readWindowAdDebugEnabled reads directly from window.location.pathname & window.location.search without DEV dependency
+  const origWin = globalThis.window;
+  try {
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { location: { pathname: '/', search: '?addebug=1' } },
+    });
+    const { readWindowAdDebugEnabled } = await import('../src/components/AdDebugPanel.tsx');
+    assert.equal(readWindowAdDebugEnabled(), true);
+
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { location: { pathname: '/', search: '' } },
+    });
+    assert.equal(readWindowAdDebugEnabled(), false);
+
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { location: { pathname: '/', search: '?addebug=0' } },
+    });
+    assert.equal(readWindowAdDebugEnabled(), false);
+
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: { location: { pathname: '/explore', search: '?addebug=1' } },
+    });
+    assert.equal(readWindowAdDebugEnabled(), false);
+  } finally {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: origWin });
+  }
+
+  // 4. Diagnostic panel escapes transform contexts via createPortal, uses max z-index, does not depend on DEV, and contains zero Ads Manager controls or secrets
+  const panelSource = fs.readFileSync(path.resolve(process.cwd(), 'src/components/AdDebugPanel.tsx'), 'utf-8');
+  assert.match(panelSource, /createPortal\(/);
+  assert.match(panelSource, /document\.body/);
+  assert.match(panelSource, /window\.location\.search/);
+  assert.match(panelSource, /window\.location\.pathname/);
+  assert.match(panelSource, /z-\[2147483000\]/);
+  assert.doesNotMatch(panelSource, /import\.meta\.env\.DEV/);
+  assert.match(panelSource, /imagelab-ad-debug-panel/);
+  assert.match(panelSource, /Placement mounted:/);
+  assert.match(panelSource, /Script element created:/);
+  assert.match(panelSource, /Script load\/error event:/);
+  assert.match(panelSource, /Nested iframe created:/);
+  assert.match(panelSource, /Visible creative detected:/);
+  assert.match(panelSource, /Available HTTP status:/);
+  assert.match(panelSource, /Removed by cleanup \/ timeout:/);
+  assert.doesNotMatch(panelSource, /Add Advertisement|Save Ad|Delete Ad|Ads Manager|promptSecrets|promptText|idToken/i);
+
+  // 5. adFrameHtml never guesses HTTP status codes when responseStatus is unavailable
+  const frameSource = fs.readFileSync(path.resolve(process.cwd(), 'src/lib/adFrameHtml.ts'), 'utf-8');
+  assert.match(frameSource, /'script_element_created'/);
+  assert.doesNotMatch(frameSource, /'HTTP 200 \(or opaque loaded\)'|'HTTP 403\/error\/blocked'/);
+
+  // 6. HomePage mounts AdDebugPanel safely without Ads Manager leakage
+  const homeSource = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/HomePage.tsx'), 'utf-8');
+  assert.match(homeSource, /<AdDebugPanel \/>/);
+});
+
+
 
 

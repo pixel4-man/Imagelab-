@@ -291,10 +291,6 @@ export function buildSandboxedAdSrcDoc(
           if (typeof last.responseStatus === 'number' && last.responseStatus > 0) {
             return 'HTTP ' + last.responseStatus;
           }
-          if (typeof last.encodedBodySize === 'number' && last.encodedBodySize === 0 && typeof last.transferSize === 'number' && last.transferSize === 0) {
-            return 'opaque-no-cors';
-          }
-          return 'HTTP 200 (or opaque loaded)';
         }
       } catch (e) {}
       return '';
@@ -406,9 +402,9 @@ export function buildSandboxedAdSrcDoc(
             emitDiagnostic(
               'script_loaded',
               'script_loaded',
-              'External ad script finished loading cleanly; waiting for DOM/iframe output.',
+              'External ad script load event fired; waiting for DOM/iframe output.',
               sUrl,
-              lookupScriptResponseStatus(sUrl) || 'loaded'
+              lookupScriptResponseStatus(sUrl)
             );
           }
           if (window.__imagelabAdProbe && !probeDisposed) window.__imagelabAdProbe.report(false);
@@ -422,8 +418,8 @@ export function buildSandboxedAdSrcDoc(
         var src = upgradeUrl(ev.target.getAttribute ? (ev.target.getAttribute('src') || '') : '');
         if (tag === 'script' || tag === 'iframe') {
           var failDetail = tag === 'script'
-            ? 'Script failed to load (HTTP 403/404, blocked by filter, or unreachable)'
-            : 'Nested ad frame failed or blocked';
+            ? 'Script error event fired (request rejected, blocked by content filter, or network failure; exact cross-origin status unavailable to JS unless exposed)'
+            : 'Nested ad frame error event fired';
           if (tag === 'script' && src) {
             earlyScriptStates[src] = 'error';
             for (var si = 0; si < externalScripts.length; si++) {
@@ -433,7 +429,7 @@ export function buildSandboxedAdSrcDoc(
             }
           }
           blockedResources.push({ tag: tag, url: src, reason: failDetail });
-          emitDiagnostic('script_failed', 'script_blocked', failDetail, src, lookupScriptResponseStatus(src) || 'HTTP 403/error/blocked');
+          emitDiagnostic('script_failed', 'script_blocked', failDetail, src, lookupScriptResponseStatus(src));
         } else if (tag === 'img') {
           imageErrors.push(src || 'image resource');
         }
@@ -825,6 +821,12 @@ export function buildSandboxedAdSrcDoc(
         var entry = { el: el, url: upgraded, status: initialStatus };
         externalScripts.push(entry);
         emitDiagnostic(
+          'script_element_created',
+          'script_request_started',
+          'Created external <script> element for zone ' + zoneKey,
+          upgraded
+        );
+        emitDiagnostic(
           'script_request_started',
           'script_request_started',
           'Requesting external ad script for zone ' + zoneKey,
@@ -839,17 +841,17 @@ export function buildSandboxedAdSrcDoc(
           emitDiagnostic(
             'script_loaded',
             'script_loaded',
-            'External ad script finished loading cleanly; waiting for DOM/iframe output.',
+            'External ad script load event fired; waiting for DOM/iframe output.',
             entry.url,
-            lookupScriptResponseStatus(entry.url) || 'loaded'
+            lookupScriptResponseStatus(entry.url)
           );
         } else if (initialStatus === 'error') {
           emitDiagnostic(
             'script_failed',
             'script_blocked',
-            'Script failed to load (HTTP 403/404, blocked by filter, or unreachable)',
+            'Script error event fired (request rejected, blocked by content filter, or network failure; exact cross-origin status unavailable to JS unless exposed)',
             entry.url,
-            lookupScriptResponseStatus(entry.url) || 'HTTP 403/error/blocked'
+            lookupScriptResponseStatus(entry.url)
           );
         }
         el.addEventListener('load', function () {
@@ -857,17 +859,17 @@ export function buildSandboxedAdSrcDoc(
           emitDiagnostic(
             'script_loaded',
             'script_loaded',
-            'External ad script finished loading cleanly; waiting for DOM/iframe output.',
+            'External ad script load event fired; waiting for DOM/iframe output.',
             entry.url,
-            lookupScriptResponseStatus(entry.url) || 'loaded'
+            lookupScriptResponseStatus(entry.url)
           );
           if (window.__imagelabAdProbe && !probeDisposed) window.__imagelabAdProbe.report(false);
         });
         el.addEventListener('error', function () {
           entry.status = 'error';
-          var failReason = 'Script failed to load (HTTP 403/404, blocked by filter, or unreachable)';
+          var failReason = 'Script error event fired (request rejected, blocked by content filter, or network failure; exact cross-origin status unavailable to JS unless exposed)';
           blockedResources.push({ tag: 'script', url: entry.url, reason: failReason });
-          emitDiagnostic('script_failed', 'script_blocked', failReason, entry.url, lookupScriptResponseStatus(entry.url) || 'HTTP 403/error/blocked');
+          emitDiagnostic('script_failed', 'script_blocked', failReason, entry.url, lookupScriptResponseStatus(entry.url));
           if (window.__imagelabAdProbe && !probeDisposed) window.__imagelabAdProbe.report(false);
         });
       } else if (tag === 'iframe') {

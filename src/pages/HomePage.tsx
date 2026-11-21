@@ -1,5 +1,6 @@
 import { ArrowRight, Layers, Sparkles } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { AdDebugPanel } from '../components/AdDebugPanel';
 import { HeroShelf3D } from '../components/HeroShelf3D';
 import { LandingCursor } from '../components/LandingCursor';
 import { PageTransition } from '../components/PageTransition';
@@ -206,6 +207,7 @@ export function HomePage() {
           </div>
         </div>
       </section>
+      <AdDebugPanel />
     </PageTransition>
   );
 }
